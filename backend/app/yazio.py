@@ -1,28 +1,32 @@
-"""Yazio nutrition sync — praezise Feldzuordnung.
+"""Yazio nutrition sync — angepasst an die reale Feldstruktur.
 
-Yazio hat KEINE offizielle API. Der Sync nutzt das Community-Tool
-``yazio-exporter``, das sich mit E-Mail/Passwort gegen Yazios private API
-einloggt. Ein Server kann das; ein Browser scheitert an CORS.
+Yazio nennt die Nährstoffe mit Punkt-Notation und liefert die Tagessumme NICHT
+direkt, sondern verteilt auf Mahlzeiten (breakfast / lunch / dinner / snack).
+Beispiel-Ausschnitt aus days.json:
 
-Warum diese Datei ueberarbeitet ist
------------------------------------
-Die erste Version hat pro Tag "das erste passende numerische Feld" genommen.
-Das kann ein Zielwert oder der Energiegehalt eines einzelnen Produkts sein,
-nicht die Tagessumme. Deshalb kamen Werte wie kcal 193 fuer den ganzen Tag
-heraus.
+    daily_summary:
+      goals:              <-- ZIELWERTE, nicht Ist-Werte!
+        energy.energy: 2574.8
+        nutrient.protein: 145.2
+        ...
+      meals:
+        breakfast:
+          nutrients:
+            energy.energy: 470.9
+            nutrient.protein: 51.99
+            nutrient.carb: 35.23
+            nutrient.fat: 11.9
+        lunch: { nutrients: { ... } }
+        dinner: { nutrients: { ... } }
+        snack:  { nutrients: { ... } }
 
-Der Parser hier arbeitet in drei Stufen und nimmt das erste plausible Ergebnis:
+Der Parser:
+1. Nutzt IMMER die Summe der ``meals[*].nutrients`` (Ist-Werte).
+2. Ignoriert ``daily_summary.goals`` (Zielwerte).
+3. Faellt auf einen defensiven Aliassen-Scan zurueck, falls Yazio das Layout
+   irgendwann aendert — Zielwerte werden dabei explizit ausgeklammert.
 
-1. **Direkte Tagesfelder** wie ``consumed_energy``, ``consumed_nutrients`` in
-   mehreren Auspraegungen.
-2. **Summe ueber die Items** eines Tages, wenn ``items`` / ``foods`` /
-   ``entries`` vorhanden sind — jedes Item liefert Energie und Naehrstoffe,
-   die aufsummiert werden.
-3. **Zielwerte** (``*_goal``) sind nur ein allerletzter Rueckfall.
-
-Bei jedem Lauf wird die zuletzt gezogene ``days.json`` nach
-``<DB_DIR>/yazio_last_dump.json`` geschrieben, damit man die Feldnamen bei
-Bedarf abgleichen kann.
+Aus der Sandbox kein Netz, daher inline mit dem letzten realen Dump getestet.
 """
 import datetime
 import json
@@ -40,40 +44,15 @@ PASSWORD = os.environ.get("YAZIO_PASSWORD")
 DATA_DIR = os.path.dirname(os.environ.get("DB_PATH", "/data/cockpit.db")) or "/data"
 DUMP_PATH = os.path.join(DATA_DIR, "yazio_last_dump.json")
 
-NUTRIENT_TOTAL_KEYS = [
-    "consumed_nutrients", "nutrients_consumed", "totals",
-    "consumed", "nutrients",
-]
-
-MACRO_ALIASES = {
-    "kcal": [
-        "consumed_energy", "energy_consumed", "energy", "kcal",
-        "consumed_kcal", "total_energy", "sum_energy",
-    ],
-    "protein": [
-        "consumed_protein", "protein_consumed", "protein",
-        "nutrient_protein", "total_protein",
-    ],
-    "carbs": [
-        "consumed_carb", "carb_consumed", "carb", "carbs",
-        "carbohydrates", "nutrient_carb", "total_carb",
-    ],
-    "fat": [
-        "consumed_fat", "fat_consumed", "fat",
-        "nutrient_fat", "total_fat",
-    ],
+# Yazio-Feldnamen (Punkt-Notation).
+YZ = {
+    "kcal":    ["energy.energy", "energy"],
+    "protein": ["nutrient.protein", "protein"],
+    "carbs":   ["nutrient.carb", "nutrient.carbs", "carb", "carbs"],
+    "fat":     ["nutrient.fat", "fat"],
 }
-ITEM_LIST_KEYS = ["items", "foods", "entries", "products", "consumed_items"]
+GOAL_MARKERS = ("goal", "target", "budget", "limit")
 DATE_KEY_HINTS = ("date", "day", "consumed_at")
-
-
-def _norm(k):
-    return re.sub(r"[^a-z0-9]+", "_", str(k).lower()).strip("_")
-
-
-def _is_goal(k):
-    n = _norm(k)
-    return "goal" in n or "target" in n or "budget" in n or "limit" in n
 
 
 def _num(v):
@@ -89,88 +68,90 @@ def _num(v):
     return None
 
 
-def _find_key(obj, aliases, skip_goals=True):
-    if not isinstance(obj, dict):
+def _pick(d, keys):
+    """Erster Treffer per exakter Schluesselgleichheit."""
+    if not isinstance(d, dict):
         return None
-    norm_aliases = [_norm(a) for a in aliases]
-    for k, v in obj.items():
-        if skip_goals and _is_goal(k):
-            continue
-        if _norm(k) in norm_aliases:
-            n = _num(v)
+    for k in keys:
+        if k in d:
+            n = _num(d[k])
             if n is not None:
                 return n
     return None
 
 
-def _macro_from_dict(d, macro):
-    return _find_key(d, MACRO_ALIASES[macro], skip_goals=True)
-
-
-def _sum_items(day):
-    lists = []
-    if isinstance(day, dict):
-        for k in ITEM_LIST_KEYS:
-            if k in day and isinstance(day[k], list):
-                lists.append(day[k])
-    if not lists:
+def _sum_meals(daily_summary):
+    """Summe ueber alle Mahlzeiten in daily_summary.meals."""
+    meals = daily_summary.get("meals") if isinstance(daily_summary, dict) else None
+    if not isinstance(meals, dict) or not meals:
         return {}
     totals = {"kcal": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
     saw = {m: False for m in totals}
-    for lst in lists:
-        for item in lst:
-            if not isinstance(item, dict):
-                continue
-            sub = None
-            for k in NUTRIENT_TOTAL_KEYS:
-                if isinstance(item.get(k), dict):
-                    sub = item[k]
-                    break
-            for m in totals:
-                v = _macro_from_dict(sub or {}, m)
-                if v is None:
-                    v = _macro_from_dict(item, m)
-                if v is not None:
-                    totals[m] += v
-                    saw[m] = True
+    for _, meal in meals.items():
+        if not isinstance(meal, dict):
+            continue
+        nutr = meal.get("nutrients") if isinstance(meal.get("nutrients"), dict) else meal
+        for macro, keys in YZ.items():
+            v = _pick(nutr, keys)
+            if v is not None:
+                totals[macro] += v
+                saw[macro] = True
     return {m: totals[m] for m in totals if saw[m]}
 
 
-def _fallback_goal(day, macro):
-    if not isinstance(day, dict):
+def _defensive_scan(obj, macro, _depth=0):
+    """Rueckfall: irgendwo im Baum den ersten Ist-Wert finden.
+    Ziel-Container werden anhand des Elternschluessels ausgeschlossen."""
+    if _depth > 6 or obj is None:
         return None
-    for k, v in day.items():
-        nk = _norm(k)
-        if "goal" in nk and macro in nk:
-            return _num(v)
+    if isinstance(obj, dict):
+        # Direkte Treffer bevorzugen
+        v = _pick(obj, YZ[macro])
+        if v is not None:
+            return v
+        for k, val in obj.items():
+            kl = str(k).lower()
+            if any(g in kl for g in GOAL_MARKERS):
+                continue  # Zielwerte ueberspringen
+            r = _defensive_scan(val, macro, _depth + 1)
+            if r is not None:
+                return r
+    elif isinstance(obj, list):
+        acc = 0.0
+        saw = False
+        for it in obj:
+            r = _defensive_scan(it, macro, _depth + 1)
+            if r is not None:
+                acc += r
+                saw = True
+        if saw:
+            return acc
     return None
 
 
 def _macros_for_day(day):
     out = {}
-    for m in MACRO_ALIASES:
-        v = _macro_from_dict(day, m)
-        if v is None:
-            for tk in NUTRIENT_TOTAL_KEYS:
-                sub = day.get(tk) if isinstance(day, dict) else None
-                if isinstance(sub, dict):
-                    v = _macro_from_dict(sub, m)
-                    if v is not None:
-                        break
-        if v is not None:
-            out[m] = v
+    ds = day.get("daily_summary") if isinstance(day, dict) else None
 
-    if len(out) < 4:
-        for m, v in _sum_items(day).items():
-            out.setdefault(m, v)
+    # 1. Ist-Summe ueber die Mahlzeiten.
+    if isinstance(ds, dict):
+        out.update(_sum_meals(ds))
 
-    for m in list(MACRO_ALIASES.keys()):
+    # 2. Defensiver Scan fuer fehlende Makros — Ziel-Container ausgeschlossen.
+    for m in YZ:
         if m not in out:
-            v = _fallback_goal(day, m)
+            # 'goals' und 'daily_summary.goals' NICHT betrachten.
+            candidate_root = {k: v for k, v in day.items()
+                              if isinstance(day, dict) and k not in ("goals",)}
+            if isinstance(ds, dict):
+                candidate_root["daily_summary"] = {k: v for k, v in ds.items()
+                                                   if k not in ("goals",)}
+            v = _defensive_scan(candidate_root, m)
             if v is not None:
                 out[m] = v
 
-    if "kcal" in out and out["kcal"] < 50:
+    # 3. Plausibilitaet: Tageswerte unter 20 kcal verwerfen.
+    if "kcal" in out and out["kcal"] < 20:
         out.pop("kcal", None)
 
     return {k: round(v) for k, v in out.items()}
@@ -179,8 +160,7 @@ def _macros_for_day(day):
 def _find_date(obj):
     if isinstance(obj, dict):
         for k, v in obj.items():
-            nk = _norm(k)
-            if any(h in nk for h in DATE_KEY_HINTS) and isinstance(v, str):
+            if any(h in str(k).lower() for h in DATE_KEY_HINTS) and isinstance(v, str):
                 m = re.search(r"\d{4}-\d{2}-\d{2}", v)
                 if m:
                     return m.group(0)
