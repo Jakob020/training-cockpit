@@ -1183,6 +1183,10 @@ function SetupView({ settings, setSettings, plan, strength, log, setPlan, setNut
     const ok = await downloadFromApi(`/api/tp/workouts.zip`, `trainingsplan_workouts.zip`);
     flash(ok ? "Workouts (TCX + ZWO) heruntergeladen" : "Export fehlgeschlagen");
   };
+  const exportFit = async () => {
+  const ok = await downloadFromApi(`/api/tp/fit.zip`, `trainingsplan_fit.zip`);
+  flash(ok ? "FIT-Workouts fuer Intervals.icu heruntergeladen" : "Export fehlgeschlagen");
+};
   const syncYazio = async () => {
     setSyncing(true);
     try {
@@ -1241,8 +1245,11 @@ function SetupView({ settings, setSettings, plan, strength, log, setPlan, setNut
         Ein Klick lädt eine ZIP mit einer .tcx-Datei (für TrainingPeaks) und einer .zwo-Datei (für Zwift/Wahoo) pro Radeinheit herunter. In den Dateien stehen ausschließlich geplante Werte: Dauer, Watt-Ziele je Block und Fueling-Ziele (Kohlenhydrate g/h, Flüssigkeit ml/h, Natrium mg/h + Gesamtsummen). Distanz und Kalorien werden bewusst nicht geschrieben — die entstehen erst beim Fahren.
       </div>
       <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-        <Btn variant="primary" onClick={() => exportWorkouts()}>
-          Änderungen als Workout-Dateien herunterladen (TCX + ZWO)
+        <Btn variant="primary" onClick={() => exportFit()}>
+          Für Intervals.icu / Wahoo (.fit-Workouts)
+        </Btn>
+        <Btn onClick={() => exportWorkouts()}>
+          Alternative: TCX + ZWO
         </Btn>
       </div>
       <div className="trn-hint">
