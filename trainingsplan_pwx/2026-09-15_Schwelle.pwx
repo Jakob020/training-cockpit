@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pwx xmlns="http://www.peaksware.com/PWX/1/0" creator="Training Cockpit" version="1.0">
+  <workout>
+    <athlete><name>Training Cockpit</name></athlete>
+    <sportType>Bike</sportType>
+    <cmt>Z4 — 3×12 min @95–105 % FTP · 6 min RB</cmt>
+    <code>Schwelle</code>
+    <time>2026-09-15T06:00:00</time>
+    <segment>
+      <name>Warmup</name>
+      <summarydata>
+        <beginning>0</beginning>
+        <duration>1296</duration>
+        <pwr min="142" max="184" avg="163"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Intervall 1/3</name>
+      <summarydata>
+        <beginning>1296</beginning>
+        <duration>720</duration>
+        <pwr min="269" max="297" avg="283"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Erholung</name>
+      <summarydata>
+        <beginning>2016</beginning>
+        <duration>360</duration>
+        <pwr min="127" max="170" avg="148"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Intervall 2/3</name>
+      <summarydata>
+        <beginning>2376</beginning>
+        <duration>720</duration>
+        <pwr min="269" max="297" avg="283"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Erholung</name>
+      <summarydata>
+        <beginning>3096</beginning>
+        <duration>360</duration>
+        <pwr min="127" max="170" avg="148"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Intervall 3/3</name>
+      <summarydata>
+        <beginning>3456</beginning>
+        <duration>720</duration>
+        <pwr min="269" max="297" avg="283"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Cooldown</name>
+      <summarydata>
+        <beginning>4176</beginning>
+        <duration>864</duration>
+        <pwr min="127" max="170" avg="148"/>
+      </summarydata>
+    </segment>
+  </workout>
+</pwx>

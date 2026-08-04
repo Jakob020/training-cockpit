@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pwx xmlns="http://www.peaksware.com/PWX/1/0" creator="Training Cockpit" version="1.0">
+  <workout>
+    <athlete><name>Training Cockpit</name></athlete>
+    <sportType>Bike</sportType>
+    <cmt>Z1 — Reduziert (Deload): Locker Z1</cmt>
+    <code>Regeneration · Deload</code>
+    <time>2026-08-30T06:00:00</time>
+    <segment>
+      <name>Regeneration · Deload</name>
+      <summarydata>
+        <beginning>0</beginning>
+        <duration>2700</duration>
+        <pwr min="142" max="170" avg="156"/>
+      </summarydata>
+    </segment>
+  </workout>
+</pwx>

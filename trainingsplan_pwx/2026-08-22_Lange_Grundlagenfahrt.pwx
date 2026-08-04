@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pwx xmlns="http://www.peaksware.com/PWX/1/0" creator="Training Cockpit" version="1.0">
+  <workout>
+    <athlete><name>Training Cockpit</name></athlete>
+    <sportType>Bike</sportType>
+    <cmt>Z2 — 4 h Z2 + 2×10 min Tempo (~88 %)</cmt>
+    <code>Lange Grundlagenfahrt</code>
+    <time>2026-08-22T06:00:00</time>
+    <segment>
+      <name>Intervall 1/2</name>
+      <summarydata>
+        <beginning>0</beginning>
+        <duration>14400</duration>
+        <pwr min="170" max="212" avg="191"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Erholung</name>
+      <summarydata>
+        <beginning>14400</beginning>
+        <duration>5760</duration>
+        <pwr min="127" max="170" avg="148"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Intervall 2/2</name>
+      <summarydata>
+        <beginning>20160</beginning>
+        <duration>14400</duration>
+        <pwr min="170" max="212" avg="191"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Erholung</name>
+      <summarydata>
+        <beginning>34560</beginning>
+        <duration>5760</duration>
+        <pwr min="127" max="170" avg="148"/>
+      </summarydata>
+    </segment>
+  </workout>
+</pwx>

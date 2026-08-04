@@ -1176,8 +1176,12 @@ function SetupView({ settings, setSettings, plan, strength, log, setPlan, setNut
   };
   const exportTP = async (scope) => {
     const ok = await downloadFromApi(`/api/tp/ics?scope=${scope}`, `trainingsplan_${scope}.ics`);
-    flash(ok ? (scope === "all" ? "Alle Tage exportiert" : "Geänderte Tage exportiert") : "Export fehlgeschlagen");
+    flash(ok ? (scope === "all" ? "Alle Tage exportiert" : "Geändertse Tage exportiert") : "Export fehlgeschlagen");
     refreshMeta();
+  };
+  const exportWorkouts = async () => {
+    const ok = await downloadFromApi(`/api/tp/workouts.zip`, `trainingsplan_workouts.zip`);
+    flash(ok ? "Workouts (TCX + ZWO) heruntergeladen" : "Export fehlgeschlagen");
   };
   const syncYazio = async () => {
     setSyncing(true);
@@ -1230,20 +1234,35 @@ function SetupView({ settings, setSettings, plan, strength, log, setPlan, setNut
         <div className="trn-hint">Alle Watt-Ziele leiten sich live aus der FTP ab ({settings.ftp} W → Sweet Spot {watt(settings.ftp, 88)}–{watt(settings.ftp, 94)} W).</div>
       </Card>
 
-      {/* TrainingPeaks-Export */}
-      <Card accent="var(--accent)">
-        <Eyebrow color="var(--accent)">TrainingPeaks / Kalender (.ics)</Eyebrow>
-        <div className="trn-hint" style={{ marginTop: 4 }}>
-          Jeder Tag ist ein Event mit fester Kennung (UID). Beim Re-Import in TrainingPeaks werden genau diese Tage überschrieben, alle anderen bleiben unberührt. Für kleine, auch nachträgliche Änderungen exportierst du nur die geänderten Tage.
-        </div>
-        <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-          <Btn variant="primary" onClick={() => exportTP("changed")}>
-            Nur geänderte Tage{tpChanged != null ? ` (${tpChanged})` : ""}
-          </Btn>
-          <Btn onClick={() => exportTP("all")}>Alle Tage</Btn>
-        </div>
-        <div className="trn-hint">Import in TrainingPeaks: Kalender → Datei importieren. Radeinheiten enthalten Watt-Ziele, Intervalle und Zone, Krafteinheiten die Übungen mit Sätzen×Wdh.</div>
-      </Card>
+      {/* TrainingPeaks — Workout-Dateien */}
+    <Card accent="var(--accent)">
+      <Eyebrow color="var(--accent)">TrainingPeaks — Workout-Dateien (TCX + ZWO)</Eyebrow>
+      <div className="trn-hint" style={{ marginTop: 4 }}>
+        Ein Klick lädt eine ZIP mit einer .tcx-Datei (für TrainingPeaks) und einer .zwo-Datei (für Zwift/Wahoo) pro Radeinheit herunter. In den Dateien stehen ausschließlich geplante Werte: Dauer, Watt-Ziele je Block und Fueling-Ziele (Kohlenhydrate g/h, Flüssigkeit ml/h, Natrium mg/h + Gesamtsummen). Distanz und Kalorien werden bewusst nicht geschrieben — die entstehen erst beim Fahren.
+      </div>
+      <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+        <Btn variant="primary" onClick={() => exportWorkouts()}>
+          Änderungen als Workout-Dateien herunterladen (TCX + ZWO)
+        </Btn>
+      </div>
+      <div className="trn-hint">
+        Nach dem Download entpacken, dann Datei für Datei in TrainingPeaks (Kalender → Upload-Symbol oben rechts) einzeln hochladen. So kannst du sie schrittweise implementieren. Krafteinheiten sind bewusst nicht enthalten — TrainingPeaks kann sie nicht strukturiert steuern.
+      </div>
+    </Card>
+
+    {/* Kalender-Ansicht (nur fuer Apple/Google Kalender, NICHT fuer TrainingPeaks) */}
+    <Card accent="var(--accent)">
+      <Eyebrow color="var(--accent)">Kalender-Ansicht (.ics)</Eyebrow>
+      <div className="trn-hint" style={{ marginTop: 4 }}>
+        Für Apple- oder Google-Kalender (nicht für TrainingPeaks — dort werden .ics nicht akzeptiert). Jeder Tag ist ein Event mit fester Kennung (UID). Beim Re-Import werden genau diese Tage überschrieben, alle anderen bleiben unberührt.
+      </div>
+      <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+        <Btn variant="primary" onClick={() => exportTP("changed")}>
+          Nur geänderte Tage{tpChanged != null ? ` (${tpChanged})` : ""}
+        </Btn>
+        <Btn onClick={() => exportTP("all")}>Alle Tage</Btn>
+      </div>
+    </Card>
 
       {/* Yazio-Sync */}
       <Card accent="var(--green)">
