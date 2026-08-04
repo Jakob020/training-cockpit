@@ -1,0 +1,27 @@
+services:
+  app:
+    build: .
+    container_name: training-cockpit
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - cockpit-data:/data
+    restart: unless-stopped
+
+  # Optional: HTTPS reverse proxy. Needed for calendar subscriptions and a real
+  # PWA home-screen install. Uncomment and set your domain in Caddyfile.
+  # caddy:
+  #   image: caddy:2
+  #   depends_on: [app]
+  #   ports: ["80:80", "443:443"]
+  #   volumes:
+  #     - ./Caddyfile:/etc/caddy/Caddyfile
+  #     - caddy-data:/data
+  #     - caddy-config:/config
+  #   restart: unless-stopped
+
+volumes:
+  cockpit-data:
+  # caddy-data:
+  # caddy-config:

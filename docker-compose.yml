@@ -9,19 +9,19 @@ services:
       - cockpit-data:/data
     restart: unless-stopped
 
-  # Optional: HTTPS reverse proxy. Needed for calendar subscriptions and a real
-  # PWA home-screen install. Uncomment and set your domain in Caddyfile.
-  # caddy:
-  #   image: caddy:2
-  #   depends_on: [app]
-  #   ports: ["80:80", "443:443"]
-  #   volumes:
-  #     - ./Caddyfile:/etc/caddy/Caddyfile
-  #     - caddy-data:/data
-  #     - caddy-config:/config
-  #   restart: unless-stopped
+  caddy:
+    image: caddy:2
+    depends_on: [app]
+    ports:
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - ./certs:/certs
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
 
 volumes:
   cockpit-data:
-  # caddy-data:
-  # caddy-config:
+  caddy-data:
+  caddy-config:
