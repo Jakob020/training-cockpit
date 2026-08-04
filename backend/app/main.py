@@ -57,6 +57,23 @@ def yazio_status():
     return db.kv_get("yazio_status") or {"lastSync": None}
 
 
+@app.get("/api/yazio/dump/{date}")
+def yazio_dump(date: str):
+    """Diagnose: liefert die Yazio-Rohdaten fuer einen Tag aus dem letzten
+    Sync-Dump. Nur nach einem erfolgreichen Sync verfuegbar."""
+    import json as _json, os as _os
+    dump = _os.path.join(_os.path.dirname(_os.environ.get("DB_PATH", "/data/cockpit.db")) or "/data", "yazio_last_dump.json")
+    if not _os.path.isfile(dump):
+        raise HTTPException(status_code=404, detail="Kein Dump vorhanden. Erst 'Jetzt synchronisieren'.")
+    with open(dump, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+    from .yazio import _iter_days, _macros_for_day
+    for iso, day in _iter_days(data):
+        if iso == date:
+            return {"date": iso, "parsed": _macros_for_day(day), "raw": day}
+    raise HTTPException(status_code=404, detail=f"Tag {date} nicht in den Yazio-Daten")
+
+
 # ----------------------------- TrainingPeaks ---------------------------------
 @app.get("/api/tp/changed-count")
 def tp_changed_count():
