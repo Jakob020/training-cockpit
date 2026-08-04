@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pwx xmlns="http://www.peaksware.com/PWX/1/0" creator="Training Cockpit" version="1.0">
+  <workout>
+    <athlete><name>Training Cockpit</name></athlete>
+    <sportType>Bike</sportType>
+    <cmt>Z2 — Taper: Gleichmäßig Z2</cmt>
+    <code>Grundlage · Taper</code>
+    <time>2026-10-21T06:00:00</time>
+    <segment>
+      <name>Grundlage · Taper</name>
+      <summarydata>
+        <beginning>0</beginning>
+        <duration>3600</duration>
+        <pwr min="170" max="212" avg="191"/>
+      </summarydata>
+    </segment>
+  </workout>
+</pwx>

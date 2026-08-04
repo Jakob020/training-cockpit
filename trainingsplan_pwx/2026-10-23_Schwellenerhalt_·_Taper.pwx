@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pwx xmlns="http://www.peaksware.com/PWX/1/0" creator="Training Cockpit" version="1.0">
+  <workout>
+    <athlete><name>Training Cockpit</name></athlete>
+    <sportType>Bike</sportType>
+    <cmt>Z4 — Taper: 2×15 min @95–100 % FTP</cmt>
+    <code>Schwellenerhalt · Taper</code>
+    <time>2026-10-23T06:00:00</time>
+    <segment>
+      <name>Intervall 1/2</name>
+      <summarydata>
+        <beginning>0</beginning>
+        <duration>900</duration>
+        <pwr min="269" max="283" avg="276"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Erholung</name>
+      <summarydata>
+        <beginning>900</beginning>
+        <duration>360</duration>
+        <pwr min="127" max="170" avg="148"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Intervall 2/2</name>
+      <summarydata>
+        <beginning>1260</beginning>
+        <duration>900</duration>
+        <pwr min="269" max="283" avg="276"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Erholung</name>
+      <summarydata>
+        <beginning>2160</beginning>
+        <duration>360</duration>
+        <pwr min="127" max="170" avg="148"/>
+      </summarydata>
+    </segment>
+  </workout>
+</pwx>

@@ -13,7 +13,7 @@ import os
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
-from . import db, ics, yazio, pwx
+from . import db, ics, yazio, workouts
 
 app = FastAPI(title="Training Cockpit")
 
@@ -94,15 +94,15 @@ def tp_ics(scope: str = "changed"):
     )
 
 
-@app.get("/api/tp/pwx.zip")
-def tp_pwx_zip():
-    """ZIP mit einer .pwx pro Radeinheit fuer den TrainingPeaks-Upload.
-    Jede .pwx enthaelt strukturierte Intervalle mit Watt-Zielen aus deiner FTP."""
-    data = pwx.build_zip()
+@app.get("/api/tp/workouts.zip")
+def tp_workouts_zip():
+    """ZIP mit .tcx (TrainingPeaks) und .zwo (Zwift/Wahoo) pro Radeinheit.
+    Enthaelt ausschliesslich geplante Werte plus Fueling-Ziele."""
+    data = workouts.build_zip()
     return Response(
         content=data,
         media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="trainingsplan_pwx.zip"'},
+        headers={"Content-Disposition": 'attachment; filename="trainingsplan_workouts.zip"'},
     )
 
 

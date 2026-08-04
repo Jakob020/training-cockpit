@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pwx xmlns="http://www.peaksware.com/PWX/1/0" creator="Training Cockpit" version="1.0">
+  <workout>
+    <athlete><name>Training Cockpit</name></athlete>
+    <sportType>Bike</sportType>
+    <cmt>Z5 — 5×4 min @106–120 % FTP · 4 min RB</cmt>
+    <code>VO2max</code>
+    <time>2026-10-13T06:00:00</time>
+    <segment>
+      <name>Warmup</name>
+      <summarydata>
+        <beginning>0</beginning>
+        <duration>1260</duration>
+        <pwr min="142" max="184" avg="163"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Intervall 1/5</name>
+      <summarydata>
+        <beginning>1260</beginning>
+        <duration>240</duration>
+        <pwr min="300" max="340" avg="320"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Erholung</name>
+      <summarydata>
+        <beginning>1500</beginning>
+        <duration>240</duration>
+        <pwr min="127" max="170" avg="148"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Intervall 2/5</name>
+      <summarydata>
+        <beginning>1740</beginning>
+        <duration>240</duration>
+        <pwr min="300" max="340" avg="320"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Erholung</name>
+      <summarydata>
+        <beginning>1980</beginning>
+        <duration>240</duration>
+        <pwr min="127" max="170" avg="148"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Intervall 3/5</name>
+      <summarydata>
+        <beginning>2220</beginning>
+        <duration>240</duration>
+        <pwr min="300" max="340" avg="320"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Erholung</name>
+      <summarydata>
+        <beginning>2460</beginning>
+        <duration>240</duration>
+        <pwr min="127" max="170" avg="148"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Intervall 4/5</name>
+      <summarydata>
+        <beginning>2700</beginning>
+        <duration>240</duration>
+        <pwr min="300" max="340" avg="320"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Erholung</name>
+      <summarydata>
+        <beginning>2940</beginning>
+        <duration>240</duration>
+        <pwr min="127" max="170" avg="148"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Intervall 5/5</name>
+      <summarydata>
+        <beginning>3180</beginning>
+        <duration>240</duration>
+        <pwr min="300" max="340" avg="320"/>
+      </summarydata>
+    </segment>
+    <segment>
+      <name>Cooldown</name>
+      <summarydata>
+        <beginning>3420</beginning>
+        <duration>840</duration>
+        <pwr min="127" max="170" avg="148"/>
+      </summarydata>
+    </segment>
+  </workout>
+</pwx>

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pwx xmlns="http://www.peaksware.com/PWX/1/0" creator="Training Cockpit" version="1.0">
+  <workout>
+    <athlete><name>Training Cockpit</name></athlete>
+    <sportType>Bike</sportType>
+    <cmt>Z4 — 20 min all-out → neuer FTP</cmt>
+    <code>FTP-Test</code>
+    <time>2026-10-22T06:00:00</time>
+    <segment>
+      <name>FTP-Test</name>
+      <summarydata>
+        <beginning>0</beginning>
+        <duration>3600</duration>
+        <pwr min="269" max="297" avg="283"/>
+      </summarydata>
+    </segment>
+  </workout>
+</pwx>
