@@ -13,7 +13,7 @@ import os
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
-from . import db, ics, yazio, workouts
+from . import db, ics, yazio, workouts, fit_workouts
 
 app = FastAPI(title="Training Cockpit")
 
@@ -105,6 +105,15 @@ def tp_workouts_zip():
         headers={"Content-Disposition": 'attachment; filename="trainingsplan_workouts.zip"'},
     )
 
+@app.get("/api/tp/fit.zip")
+def tp_fit_zip():
+    """ZIP mit binaeren .fit-Workouts pro Radeinheit fuer Intervals.icu."""
+    data = fit_workouts.build_zip()
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="trainingsplan_fit.zip"'},
+    )
 
 # ------------------------------- Scheduler -----------------------------------
 @app.on_event("startup")
