@@ -1,0 +1,6 @@
+# Ersetze die Domain durch deine eigene. Caddy holt automatisch ein
+# Let's-Encrypt-Zertifikat. HTTPS ist Voraussetzung für Kalender-Abos
+# und die Installation als PWA auf dem iPhone-Home-Bildschirm.
+cockpit.deine-domain.de {
+    reverse_proxy app:8000
+}
