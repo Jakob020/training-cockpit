@@ -9,48 +9,93 @@ import { useState, useEffect, useRef } from "react";
 /* ----------------------- Storage-Layer (Backend-API) -------------------- */
 const hasStore = true; // Backend übernimmt die Persistenz.
 
+/* Offline-Unterstützung: jeder erfolgreiche Load/Save wird zusätzlich lokal
+   gecacht. Schlägt ein Save fehl (kein Netz), landet der Wert in einer
+   "pending"-Warteschlange in localStorage und wird automatisch nachgeholt,
+   sobald wieder eine Verbindung da ist (siehe flushPendingWrites). */
+const OFFLINE_CACHE_PREFIX = "cockpit_cache_";
+const OFFLINE_PENDING_PREFIX = "cockpit_pending_";
+
+function cacheLocal(key, value) {
+  try { localStorage.setItem(OFFLINE_CACHE_PREFIX + key, JSON.stringify(value)); } catch (e) {}
+}
+function readLocalCache(key) {
+  try {
+    const raw = localStorage.getItem(OFFLINE_CACHE_PREFIX + key);
+    return raw != null ? JSON.parse(raw) : undefined;
+  } catch (e) { return undefined; }
+}
+function queuePendingWrite(key, value) {
+  try { localStorage.setItem(OFFLINE_PENDING_PREFIX + key, JSON.stringify(value)); } catch (e) {}
+}
+function clearPendingWrite(key) {
+  try { localStorage.removeItem(OFFLINE_PENDING_PREFIX + key); } catch (e) {}
+}
+function readPendingWrite(key) {
+  try {
+    const raw = localStorage.getItem(OFFLINE_PENDING_PREFIX + key);
+    return raw != null ? JSON.parse(raw) : undefined;
+  } catch (e) { return undefined; }
+}
+function listPendingKeys() {
+  const out = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(OFFLINE_PENDING_PREFIX)) out.push(k.slice(OFFLINE_PENDING_PREFIX.length));
+    }
+  } catch (e) {}
+  return out;
+}
+
 async function loadKey(key, fallback) {
   try {
     const r = await fetch(`/api/kv/${key}`);
-    if (r.status === 404) return fallback;
+    if (r.status === 404) { cacheLocal(key, fallback); return fallback; }
     if (!r.ok) throw new Error("load failed");
     const j = await r.json();
-    return j.value ?? fallback;
-  } catch (e) { return fallback; }
+    const val = j.value ?? fallback;
+    cacheLocal(key, val);
+    return val;
+  } catch (e) {
+    // Offline oder Server nicht erreichbar: letzten bekannten Stand nutzen.
+    const cached = readLocalCache(key);
+    return cached !== undefined ? cached : fallback;
+  }
 }
 async function saveKey(key, value) {
+  cacheLocal(key, value);
   try {
     const r = await fetch(`/api/kv/${key}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ value }),
     });
-    return r.ok;
-  } catch (e) { console.error("Speichern fehlgeschlagen:", key, e); return false; }
+    if (!r.ok) throw new Error("save failed");
+    clearPendingWrite(key);
+    return true;
+  } catch (e) {
+    // Offline: Wert lokal vormerken, wird bei Wiederverbindung nachgesynct.
+    queuePendingWrite(key, value);
+    return false;
+  }
 }
 async function deleteKey(key) {
   try {
     await fetch(`/api/kv/${key}`, { method: "DELETE" });
+    clearPendingWrite(key);
     return true;
   } catch (e) { return false; }
 }
-async function downloadFromApi(url, fallbackName) {
-  try {
-    const r = await fetch(url);
-    if (!r.ok) return false;
-    const blob = await r.blob();
-    const cd = r.headers.get("Content-Disposition") || "";
-    const m = cd.match(/filename="([^"]+)"/);
-    const name = m ? m[1] : fallbackName;
-    const u = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = u; a.download = name;
-    document.body.appendChild(a); a.click();
-    setTimeout(() => { URL.revokeObjectURL(u); a.remove(); }, 500);
-    return true;
-  } catch (e) { return false; }
+async function flushPendingWrites() {
+  const keys = listPendingKeys();
+  for (const key of keys) {
+    const value = readPendingWrite(key);
+    if (value === undefined) { clearPendingWrite(key); continue; }
+    await saveKey(key, value);
+  }
+  return listPendingKeys().length;
 }
-
 /* ------------------------------ Datum-Helfer ---------------------------- */
 const WD = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
 const WD_LONG = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
@@ -75,8 +120,11 @@ const fmtDate = (dISO) => {
 };
 
 /* ------------------------------ Zahl-Helfer ----------------------------- */
-const num = (v) => { const n = Number(v); return isFinite(n) ? n : 0; };
-const numOrNull = (v) => { if (v === "" || v === null || v === undefined) return null; const n = Number(v); return isFinite(n) ? n : null; };
+// Zahlen robust parsen: erlaubt sowohl "91.1" als auch "91,1" (deutsches Komma),
+// wie es beim Tippen auf dem iPhone/Mac mit deutschem Tastaturlayout entsteht.
+const parseLocaleNum = (v) => (typeof v === "string" ? Number(v.trim().replace(",", ".")) : Number(v));
+const num = (v) => { const n = parseLocaleNum(v); return isFinite(n) ? n : 0; };
+const numOrNull = (v) => { if (v === "" || v === null || v === undefined) return null; const n = parseLocaleNum(v); return isFinite(n) ? n : null; };
 const r5 = (n) => Math.round(n / 5) * 5;
 const r50 = (n) => Math.round(n / 50) * 50;
 const watt = (ftp, pct) => Math.round(ftp * num(pct) / 100);
@@ -346,6 +394,8 @@ export default function App() {
   const [tab, setTab] = useState("today");
   const [viewISO, setViewISO] = useState(toISO(new Date()));
   const [toast, setToast] = useState(null);
+  const [isOnline, setIsOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
+  const [hasPending, setHasPending] = useState(() => listPendingKeys().length > 0);
   const loadedRef = useRef(false);
   const timers = useRef({});
 
@@ -373,13 +423,40 @@ export default function App() {
   const persist = (key, value) => {
     if (!loadedRef.current) return;
     clearTimeout(timers.current[key]);
-    timers.current[key] = setTimeout(() => saveKey(key, value), 500);
+    timers.current[key] = setTimeout(async () => {
+      await saveKey(key, value);
+      setHasPending(listPendingKeys().length > 0);
+    }, 500);
   };
   useEffect(() => { persist("settings", settings); }, [settings]);
   useEffect(() => { if (plan) persist("plan", plan); }, [plan]);
   useEffect(() => { persist("nutrition", nutrition); }, [nutrition]);
   useEffect(() => { persist("strength", strength); }, [strength]);
   useEffect(() => { persist("log", log); }, [log]);
+
+  // Offline-Modus: bei Verbindungsverlust weiterarbeiten (Daten liegen lokal),
+  // bei Rückkehr automatisch alles nachsynchronisieren.
+  useEffect(() => {
+    const onOnline = async () => {
+      setIsOnline(true);
+      await flushPendingWrites();
+      setHasPending(listPendingKeys().length > 0);
+    };
+    const onOffline = () => setIsOnline(false);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    const retry = setInterval(async () => {
+      if (navigator.onLine && listPendingKeys().length > 0) {
+        await flushPendingWrites();
+        setHasPending(listPendingKeys().length > 0);
+      }
+    }, 20000);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+      clearInterval(retry);
+    };
+  }, []);
 
   const flash = (msg) => { setToast(msg); setTimeout(() => setToast(null), 1800); };
 
@@ -406,6 +483,8 @@ export default function App() {
         <Header info={info} settings={settings} />
         <div className="trn-content">
           {!hasStore && <div className="trn-warn">Speicher nicht verfügbar — Eingaben werden in dieser Sitzung gehalten, aber nicht dauerhaft gesichert.</div>}
+          {!isOnline && <div className="trn-warn">Offline — Eingaben werden lokal gespeichert und automatisch synchronisiert, sobald wieder Internet da ist.</div>}
+          {isOnline && hasPending && <div className="trn-warn">Synchronisiere ausstehende Änderungen…</div>}
 
           {tab === "today" && (
             <TodayView info={info} viewISO={viewISO} setViewISO={setViewISO} settings={settings}
@@ -510,7 +589,7 @@ function TodayView({ info, viewISO, setViewISO, settings, plan, nutrition, stren
           onSave={saveOverride} onCancel={() => setOvEdit(false)} />
       )}
 
-      <NutritionCard day={day || { dayType: "rest" }} nutrition={nutrition} entry={entry} viewISO={viewISO} updateLog={updateLog} />
+      <NutritionCard day={day || { dayType: "rest" }} nutrition={nutrition} entry={entry} />
 
       <Card>
         <div className="trn-row-between">
@@ -696,7 +775,10 @@ function StrengthCard({ day, week, strength, viewISO, entry, updateLog, log }) {
   );
 }
 
-function NutritionCard({ day, nutrition, entry, viewISO, updateLog }) {
+/* Ernährungswerte sind bewusst schreibgeschützt: sie kommen ausschliesslich
+   aus dem Yazio-Sync. Der manuelle Import unter Setup → Yazio bleibt als
+   Notfall-Weg, falls der Sync mal falsche Werte liefert. */
+function NutritionCard({ day, nutrition, entry }) {
   const t = nutrition[day.dayType] || nutrition.rest;
   const rows = [
     { key: "kcal", label: "kcal", target: `${t.kcalMin}–${t.kcalMax}`, val: entry.kcal, mid: (t.kcalMin + t.kcalMax) / 2 },
@@ -704,6 +786,7 @@ function NutritionCard({ day, nutrition, entry, viewISO, updateLog }) {
     { key: "carbs", label: "Carbs", target: `~${t.carbs} g`, val: entry.carbs, mid: t.carbs, suf: "g" },
     { key: "fat", label: "Fett", target: `~${t.fat} g`, val: entry.fat, mid: t.fat, suf: "g" },
   ];
+  const anyValue = rows.some((r) => numOrNull(r.val) != null);
   return (
     <Card>
       <div className="trn-row-between"><Eyebrow>Ernährung · {t.label}</Eyebrow><span className="trn-mini-label">aus Yazio übertragen</span></div>
@@ -715,16 +798,16 @@ function NutritionCard({ day, nutrition, entry, viewISO, updateLog }) {
           return (
             <div className="trn-nut-cell" key={r.key}>
               <div className="trn-nut-top"><span className="trn-nut-label">{r.label}</span><span className="trn-nut-target">Ziel {r.target}</span></div>
-              <div className="trn-nut-inputrow">
-                <input className="trn-input trn-input-num wide" inputMode="decimal" placeholder="—"
-                  value={r.val ?? ""} onChange={(e) => updateLog(viewISO, { [r.key]: e.target.value === "" ? null : e.target.value })} />
-                {r.suf && <span className="trn-suffix">{r.suf}</span>}
+              <div className="trn-nut-readout">
+                <span className={`trn-nut-value${v == null ? " empty" : ""}`}>{v != null ? de(v) : "—"}</span>
+                {r.suf && v != null && <span className="trn-nut-unit">{r.suf}</span>}
               </div>
               <Bar pct={pct} color={col} />
             </div>
           );
         })}
       </div>
+      {!anyValue && <div className="trn-hint" style={{ marginTop: 10 }}>Für diesen Tag liegen noch keine Yazio-Daten vor. Der Sync läuft alle 30 Minuten.</div>}
     </Card>
   );
 }
@@ -882,6 +965,15 @@ function StatsView({ info, settings, plan, nutrition, strength, log }) {
 }
 function WStat({ label, value }) {
   return <div className="trn-wstat"><div className="trn-wstat-val">{value}</div><div className="trn-wstat-lab">{label}</div></div>;
+}
+/* Nur-Lese-Pendant zu <Field> fuer die Phasen-Uebersicht. */
+function PhaseStat({ label, value }) {
+  return (
+    <div className="trn-phase-stat">
+      <span className="trn-field-label">{label}</span>
+      <span className="trn-phase-stat-val">{value === null || value === undefined || value === "" ? "—" : value}</span>
+    </div>
+  );
 }
 function Spark({ series, min, max }) {
   const withW = series.map((p, i) => ({ x: i, w: p.w })).filter((p) => p.w != null);
@@ -1070,7 +1162,6 @@ function StrengthEditor({ strength, setStrength, flash }) {
     if (j < 0 || j >= arr.length) return p; [arr[i], arr[j]] = [arr[j], arr[i]];
     return { ...p, sessions: { ...p.sessions, [sess]: arr } };
   });
-  const updatePhase = (key, patch) => setStrength((p) => ({ ...p, phases: { ...p.phases, [key]: { ...p.phases[key], ...patch } } }));
   const resetAll = () => { setStrength(DEFAULT_STRENGTH); flash("Kraftplan zurückgesetzt"); };
   return (
     <>
@@ -1100,9 +1191,12 @@ function StrengthEditor({ strength, setStrength, flash }) {
         <Btn small onClick={addEx} style={{ marginTop: 8 }}>+ Übung hinzufügen</Btn>
       </Card>
 
+      {/* Phasen sind reine Übersicht — die Werte stehen fest und lassen sich
+          hier bewusst nicht bearbeiten. Abweichungen gehen über die
+          individuellen Sätze/Wdh. je Übung in der Karte darüber. */}
       <Card>
         <Eyebrow>Phasen · Sätze / Wdh. / RIR / Pause</Eyebrow>
-        <div className="trn-hint" style={{ marginTop: 4, marginBottom: 4 }}>Standardwerte je Phase. Einzelne Übungen können oben abweichen.</div>
+        <div className="trn-hint" style={{ marginTop: 4, marginBottom: 4 }}>Feste Standardwerte je Phase — nur zur Übersicht. Einzelne Übungen können oben abweichen.</div>
         <div className="trn-phase-edit">
           {PHASE_ORDER.map((k) => {
             const ph = strength.phases[k];
@@ -1110,10 +1204,10 @@ function StrengthEditor({ strength, setStrength, flash }) {
               <div className="trn-phase-block" key={k}>
                 <div className="trn-phase-title">{ph.label} <span className="trn-mini-label">· W {ph.weeks}</span></div>
                 <div className="trn-phase-fields">
-                  <Field label="Sätze" value={ph.sets} onChange={(v) => updatePhase(k, { sets: v })} />
-                  <Field label="Wdh." value={ph.reps} onChange={(v) => updatePhase(k, { reps: v })} />
-                  <Field label="RIR" value={ph.rir} onChange={(v) => updatePhase(k, { rir: v })} />
-                  <Field label="Pause" value={ph.rest} onChange={(v) => updatePhase(k, { rest: v })} />
+                  <PhaseStat label="Sätze" value={ph.sets} />
+                  <PhaseStat label="Wdh." value={ph.reps} />
+                  <PhaseStat label="RIR" value={ph.rir} />
+                  <PhaseStat label="Pause" value={ph.rest} />
                 </div>
               </div>
             );
@@ -1157,13 +1251,11 @@ function SetupView({ settings, setSettings, plan, strength, log, setPlan, setNut
   const [confirmReset, setConfirmReset] = useState(false);
   const [importText, setImportText] = useState("");
   const [preview, setPreview] = useState(null);
-  const [tpChanged, setTpChanged] = useState(null);
   const [yzStatus, setYzStatus] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const mon = mondayOf(fromISO(settings.week1Start));
 
   const refreshMeta = async () => {
-    try { const r = await fetch("/api/tp/changed-count"); if (r.ok) setTpChanged((await r.json()).count); } catch (e) {}
     setYzStatus(await loadKey("yazio_status", null));
   };
   useEffect(() => { refreshMeta(); }, []);
@@ -1174,19 +1266,6 @@ function SetupView({ settings, setSettings, plan, strength, log, setPlan, setNut
     setSettings(DEFAULT_SETTINGS); setPlan(generatePlan()); setNutrition(DEFAULT_NUTRITION); setStrength(DEFAULT_STRENGTH); setLog({});
     setConfirmReset(false); flash("Alle Daten gelöscht");
   };
-  const exportTP = async (scope) => {
-    const ok = await downloadFromApi(`/api/tp/ics?scope=${scope}`, `trainingsplan_${scope}.ics`);
-    flash(ok ? (scope === "all" ? "Alle Tage exportiert" : "Geändertse Tage exportiert") : "Export fehlgeschlagen");
-    refreshMeta();
-  };
-  const exportWorkouts = async () => {
-    const ok = await downloadFromApi(`/api/tp/workouts.zip`, `trainingsplan_workouts.zip`);
-    flash(ok ? "Workouts (TCX + ZWO) heruntergeladen" : "Export fehlgeschlagen");
-  };
-  const exportFit = async () => {
-  const ok = await downloadFromApi(`/api/tp/fit.zip`, `trainingsplan_fit.zip`);
-  flash(ok ? "FIT-Workouts fuer Intervals.icu heruntergeladen" : "Export fehlgeschlagen");
-};
   const syncYazio = async () => {
     setSyncing(true);
     try {
@@ -1238,44 +1317,11 @@ function SetupView({ settings, setSettings, plan, strength, log, setPlan, setNut
         <div className="trn-hint">Alle Watt-Ziele leiten sich live aus der FTP ab ({settings.ftp} W → Sweet Spot {watt(settings.ftp, 88)}–{watt(settings.ftp, 94)} W).</div>
       </Card>
 
-      {/* TrainingPeaks — Workout-Dateien */}
-    <Card accent="var(--accent)">
-      <Eyebrow color="var(--accent)">TrainingPeaks — Workout-Dateien (TCX + ZWO)</Eyebrow>
-      <div className="trn-hint" style={{ marginTop: 4 }}>
-        Ein Klick lädt eine ZIP mit einer .tcx-Datei (für TrainingPeaks) und einer .zwo-Datei (für Zwift/Wahoo) pro Radeinheit herunter. In den Dateien stehen ausschließlich geplante Werte: Dauer, Watt-Ziele je Block und Fueling-Ziele (Kohlenhydrate g/h, Flüssigkeit ml/h, Natrium mg/h + Gesamtsummen). Distanz und Kalorien werden bewusst nicht geschrieben — die entstehen erst beim Fahren.
-      </div>
-      <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-        <Btn variant="primary" onClick={() => exportFit()}>
-          Für Intervals.icu / Wahoo (.fit-Workouts)
-        </Btn>
-        <Btn onClick={() => exportWorkouts()}>
-          Alternative: TCX + ZWO
-        </Btn>
-      </div>
-      <div className="trn-hint">
-        Nach dem Download entpacken, dann Datei für Datei in TrainingPeaks (Kalender → Upload-Symbol oben rechts) einzeln hochladen. So kannst du sie schrittweise implementieren. Krafteinheiten sind bewusst nicht enthalten — TrainingPeaks kann sie nicht strukturiert steuern.
-      </div>
-    </Card>
-
-    {/* Kalender-Ansicht (nur fuer Apple/Google Kalender, NICHT fuer TrainingPeaks) */}
-    <Card accent="var(--accent)">
-      <Eyebrow color="var(--accent)">Kalender-Ansicht (.ics)</Eyebrow>
-      <div className="trn-hint" style={{ marginTop: 4 }}>
-        Für Apple- oder Google-Kalender (nicht für TrainingPeaks — dort werden .ics nicht akzeptiert). Jeder Tag ist ein Event mit fester Kennung (UID). Beim Re-Import werden genau diese Tage überschrieben, alle anderen bleiben unberührt.
-      </div>
-      <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-        <Btn variant="primary" onClick={() => exportTP("changed")}>
-          Nur geänderte Tage{tpChanged != null ? ` (${tpChanged})` : ""}
-        </Btn>
-        <Btn onClick={() => exportTP("all")}>Alle Tage</Btn>
-      </div>
-    </Card>
-
       {/* Yazio-Sync */}
       <Card accent="var(--green)">
         <Eyebrow color="var(--green)">Yazio-Sync</Eyebrow>
         <div className="trn-hint" style={{ marginTop: 4 }}>
-          Der Server holt deine Tageswerte automatisch einmal täglich am Tagesende (inoffizielle Yazio-API, Zugangsdaten in der .env). Du kannst jederzeit manuell synchronisieren.
+          Der Server holt deine Tageswerte automatisch alle 30 Minuten (inoffizielle Yazio-API, Zugangsdaten in der .env). Du kannst jederzeit manuell synchronisieren.
         </div>
         <div style={{ display: "flex", gap: 8, marginTop: 12, alignItems: "center", flexWrap: "wrap" }}>
           <Btn variant="primary" onClick={syncYazio} disabled={syncing}>{syncing ? "Synchronisiere…" : "Jetzt von Yazio synchronisieren"}</Btn>
@@ -1308,16 +1354,6 @@ function SetupView({ settings, setSettings, plan, strength, log, setPlan, setNut
           </div>
         )}
         {preview && preview.length === 0 && <div className="trn-mini-label" style={{ marginTop: 8 }}>Keine gültigen Zeilen erkannt — prüfe das Format.</div>}
-      </Card>
-
-      {/* iPhone */}
-      <Card>
-        <Eyebrow>Auf dem iPhone nutzen</Eyebrow>
-        <div className="trn-help">
-          <p><b>Schnellster Weg:</b> Öffne dieses Dashboard in der Claude-App und tippe oben rechts auf „Veröffentlichen". Öffne den erzeugten Link in <b>Safari</b>, dann Teilen-Symbol → <b>„Zum Home-Bildschirm"</b>. So bekommst du ein Icon, das direkt hierher springt.</p>
-          <p><b>Alternativ:</b> Claude-App aufs Home-Menü legen und dieses Gespräch anpinnen.</p>
-          <p className="trn-mini-label">Für eine komplett eigenständige App mit Icon (unabhängig von Claude) baue ich dir auf Wunsch eine installierbare Web-App, die du z. B. über GitLab Pages hostest — sag einfach Bescheid.</p>
-        </div>
       </Card>
 
       <Card>
@@ -1413,6 +1449,10 @@ function Style() {
     .trn-nut-label{font-size:12px;font-weight:600;}
     .trn-nut-target{font-size:10px;color:var(--faint);font-family:var(--mono);}
     .trn-nut-inputrow{display:flex;align-items:center;gap:4px;margin-bottom:6px;}
+    .trn-nut-readout{display:flex;align-items:baseline;gap:4px;margin-bottom:6px;min-height:26px;}
+    .trn-nut-value{font-family:var(--mono);font-size:21px;font-weight:700;line-height:1;letter-spacing:-.3px;}
+    .trn-nut-value.empty{color:var(--faint);font-weight:600;}
+    .trn-nut-unit{font-family:var(--mono);font-size:12px;color:var(--faint);}
 
     .trn-input{background:var(--surface2);border:1px solid var(--border2);border-radius:9px;color:var(--txt);font-size:14px;padding:9px 11px;width:100%;font-family:var(--sans);outline:none;}
     .trn-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(76,144,217,0.15);}
@@ -1513,6 +1553,8 @@ function Style() {
     .trn-phase-title{font-size:13px;font-weight:700;margin-bottom:8px;}
     .trn-phase-fields{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;}
     .trn-phase-fields .trn-input{padding:7px 8px;font-size:12px;text-align:center;}
+    .trn-phase-stat{display:flex;flex-direction:column;gap:4px;align-items:center;background:var(--surface2);border:1px solid var(--border);border-radius:9px;padding:7px 6px;}
+    .trn-phase-stat-val{font-family:var(--mono);font-size:13px;font-weight:700;text-align:center;line-height:1.2;}
 
     .trn-ovr-ex-head{display:grid;grid-template-columns:1fr 58px 58px 30px;gap:6px;font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;padding:0 2px;}
     .trn-ovr-ex-row{display:grid;grid-template-columns:1fr 58px 58px 30px;gap:6px;margin-bottom:6px;align-items:center;}
