@@ -1,14 +1,16 @@
 # Training Cockpit
 
-Selbstgehostetes, tägliches Trainings-Dashboard für einen 12-Wochen-Block (Sweet Spot → Schwelle → VO2max), mit Watt-Zielen aus der FTP, Kraftplan, Ernährungs-Tracking und Gewichtstrend. Server-Version der ursprünglichen Sandbox-App: die Persistenz läuft jetzt über ein FastAPI-Backend mit SQLite, plus zwei Integrationen — **Yazio-Sync** (automatisch täglich) und **TrainingPeaks-Export** (nur geänderte Tage).
+Selbstgehostetes, tägliches Trainings-Dashboard für einen 12-Wochen-Block (Sweet Spot → Schwelle → VO2max), mit Watt-Zielen aus der FTP, Kraftplan, Ernährungs-Tracking und Gewichtstrend. Server-Version der ursprünglichen Sandbox-App: die Persistenz läuft über ein FastAPI-Backend mit SQLite, plus **Yazio-Sync** (automatisch alle 30 Minuten) und einem **Offline-Modus** fürs Training unterwegs.
 
 ## Was diese Version kann
 
 - **Cockpit-Ansicht** pro Tag: Watt-Ziele, Fuel-Bedarf, Kraft-Session, Ernährungsziele, Gewicht/Notiz.
 - **Individuelle Tages-Einheit:** „Einheit für heute ersetzen" erlaubt eine komplett frei zusammengestellte Einheit — bei Kraft mit eigenen Übungen inkl. Sätzen und Wdh., bei Rad mit eigener Struktur. Gilt nur für diesen Tag, der Grundplan bleibt unangetastet.
 - **Auswertung:** Gewichtstrend mit Ampel, Fortschritt zum Ziel, Wochenbilanz, Makro-Bilanz (kcal/Protein/Carbs/Fett) der letzten 7 Tage, Kraft-Verlauf.
-- **Yazio-Sync (automatisch):** einmal täglich am Tagesende zieht der Server deine Tageswerte und schreibt kcal/Protein/Carbs/Fett in die betroffenen Tage.
-- **TrainingPeaks-Export (kostenlos):** `.ics`-Export **nur der geänderten Tage**, jeder Tag mit stabiler UID → Re-Import überschreibt genau diese Tage in TrainingPeaks, der Rest bleibt unberührt.
+- **Yazio-Sync (automatisch):** alle 30 Minuten zieht der Server deine Tageswerte und schreibt kcal/Protein/Carbs/Fett in die betroffenen Tage.
+- **Offline-Modus:** die App-Hülle wird per Service Worker gecacht, Eingaben werden ohne Verbindung lokal zwischengespeichert und automatisch nachsynchronisiert, sobald wieder Internet da ist.
+
+> Der Export nach TrainingPeaks und in den Kalender (.ics/.tcx/.zwo/.fit) wurde entfernt.
 
 ## Architektur
 
@@ -16,9 +18,8 @@ Selbstgehostetes, tägliches Trainings-Dashboard für einen 12-Wochen-Block (Swe
 Browser ──▶ FastAPI (uvicorn, :8000)
               ├── /api/kv/*       JSON-Blobs (settings, plan, nutrition, strength, log)  → SQLite
               ├── /api/yazio/*    manueller/automatischer Yazio-Sync
-              ├── /api/tp/ics     Kalender-Export (scope=all|changed)
-              └── /               ausgeliefertes React-Frontend (Vite-Build)
-            └── APScheduler       täglicher Yazio-Job am Tagesende
+              └── /               ausgeliefertes React-Frontend (Vite-Build, inkl. Service Worker)
+            └── APScheduler       Yazio-Job alle 30 Minuten
 ```
 
 Ein einziger Container baut das Frontend und serviert es zusammen mit der API. SQLite liegt im Volume `/data`.
@@ -31,7 +32,7 @@ docker compose up -d --build
 # App: http://localhost:8000
 ```
 
-Für den Betrieb im Netz (Kalender-Abo, PWA-Icon) hinter HTTPS: den `caddy`-Block in `docker-compose.yml` einkommentieren und die Domain in `Caddyfile` setzen.
+Für den Betrieb im Netz (PWA-Icon, Offline-Modus per Service Worker — der braucht HTTPS) hinter HTTPS: den `caddy`-Block in `docker-compose.yml` einkommentieren und die Domain in `Caddyfile` setzen.
 
 ### Lokal ohne Docker (Entwicklung)
 
@@ -58,15 +59,11 @@ git push -u origin main
 
 (HTTPS statt SSH: `https://github.com/DEIN-USER/training-cockpit.git`.)
 
-## TrainingPeaks-Workflow
+## Offline-Modus
 
-1. In der App unter **Setup → TrainingPeaks** auf „Nur geänderte Tage" tippen → `.ics` wird heruntergeladen (die Zahl zeigt, wie viele Tage sich seit dem letzten Export geändert haben).
-2. In TrainingPeaks: Kalender → Datei importieren.
-3. Weil jeder Tag eine feste UID hat, werden nur diese Tage überschrieben. „Alle Tage" exportiert den kompletten Block (z. B. beim ersten Mal).
+Die App-Hülle (HTML/JS/CSS/Icons) wird per Service Worker (`frontend/public/sw.js`) im Browser gecacht, damit das Dashboard auch ohne Verbindung öffnet — z. B. während einer Fahrt ohne Empfang. Eingaben (Gewicht, Ernährung, „Einheit absolviert" …) werden dabei zusätzlich in `localStorage` zwischengespeichert; sobald wieder eine Verbindung da ist (Event `online` oder alle 20 Sekunden geprüft), werden sie automatisch an den Server nachgesynct. Ein Banner im Dashboard zeigt an, wenn offline gearbeitet wird oder noch Änderungen ausstehen.
 
-Rad-Events enthalten Watt-Ziele, Intervalle und Zone; Kraft-Events die Übungen mit Sätzen×Wdh. Reine Ruhetage kommen als „Ruhetag"-Event mit, damit ein Wechsel Training→Ruhe den alten Eintrag sauber überschreibt.
-
-> Hinweis: Strukturierte TrainingPeaks-Workouts (die dein Gerät steuern) gehen nur über die Partner-API, die für Privatnutzung nicht offen ist. Der `.ics`-Weg ist der kostenlose, praktikable Ersatz für die Kalenderansicht. Für gerätesteuernde Bike-Intervalle wäre ein `.zwo`/`.erg`-Export je Einheit sinnvoll — leicht ergänzbar, sobald das Intervall-Datenmodell strukturiert ist (heute Freitext).
+Voraussetzung: die App muss mindestens einmal online geöffnet worden sein, damit der Browser die Hülle cachen kann — Offline-Modus ersetzt nicht die Erreichbarkeit des Servers selbst (siehe Hinweis zu Tailscale unten).
 
 ## Yazio-Sync — wichtige Hinweise (inoffiziell)
 
@@ -101,16 +98,17 @@ training-cockpit/
 │   └── app/
 │       ├── main.py         # FastAPI-Routen + Scheduler
 │       ├── db.py           # SQLite-KV-Store
-│       ├── ics.py          # Kalender-Export + Changed-Day-Diff
 │       └── yazio.py        # inoffizieller Yazio-Sync
 └── frontend/
     ├── package.json
     ├── vite.config.js
     ├── index.html
-    ├── public/manifest.webmanifest
+    ├── public/
+    │   ├── manifest.webmanifest
+    │   └── sw.js            # Service Worker fuer den Offline-Modus
     └── src/
         ├── main.jsx
-        └── App.jsx         # das Dashboard (Storage → API)
+        └── App.jsx         # das Dashboard (Storage → API, Offline-Queue)
 ```
 
 ## Offene Punkte / Ehrlichkeit

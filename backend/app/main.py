@@ -4,16 +4,14 @@ Serves:
 - /api/kv/{key}         key/value store the frontend uses instead of window.storage
 - /api/yazio/sync       trigger a Yazio pull now
 - /api/yazio/status     last sync result
-- /api/tp/changed-count number of days changed since last TP export
-- /api/tp/ics           .ics export (scope=all | changed)
 - /                     the built frontend (static)
 """
 import os
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from . import db, ics, yazio, workouts, fit_workouts
+from . import db, yazio
 
 app = FastAPI(title="Training Cockpit")
 
@@ -74,62 +72,26 @@ def yazio_dump(date: str):
     raise HTTPException(status_code=404, detail=f"Tag {date} nicht in den Yazio-Daten")
 
 
-# ----------------------------- TrainingPeaks ---------------------------------
-@app.get("/api/tp/changed-count")
-def tp_changed_count():
-    return {"count": len(ics.changed())}
-
-
-@app.get("/api/tp/ics")
-def tp_ics(scope: str = "changed"):
-    events = ics.compute_events()
-    selected = events if scope == "all" else ics.changed(events)
-    ics.mark_exported(selected)
-    body = ics.build_ics(selected)
-    fname = "trainingsplan_alle.ics" if scope == "all" else "trainingsplan_aenderungen.ics"
-    return Response(
-        content=body,
-        media_type="text/calendar",
-        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
-    )
-
-
-@app.get("/api/tp/workouts.zip")
-def tp_workouts_zip():
-    """ZIP mit .tcx (TrainingPeaks) und .zwo (Zwift/Wahoo) pro Radeinheit.
-    Enthaelt ausschliesslich geplante Werte plus Fueling-Ziele."""
-    data = workouts.build_zip()
-    return Response(
-        content=data,
-        media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="trainingsplan_workouts.zip"'},
-    )
-
-@app.get("/api/tp/fit.zip")
-def tp_fit_zip():
-    """ZIP mit binaeren .fit-Workouts pro Radeinheit fuer Intervals.icu."""
-    data = fit_workouts.build_zip()
-    return Response(
-        content=data,
-        media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="trainingsplan_fit.zip"'},
-    )
-
 # ------------------------------- Scheduler -----------------------------------
 @app.on_event("startup")
 def start_scheduler():
     if os.environ.get("YAZIO_SYNC_ENABLED", "true").lower() != "true":
         return
     try:
+        import datetime
         from apscheduler.schedulers.background import BackgroundScheduler
-        from apscheduler.triggers.cron import CronTrigger
+        from apscheduler.triggers.interval import IntervalTrigger
     except ImportError:
         return
-    hour = int(os.environ.get("YAZIO_SYNC_HOUR", "23"))
-    minute = int(os.environ.get("YAZIO_SYNC_MINUTE", "30"))
+    minutes = int(os.environ.get("YAZIO_SYNC_INTERVAL_MINUTES", "30"))
     tz = os.environ.get("TZ", "Europe/Berlin")
     sched = BackgroundScheduler(timezone=tz)
-    sched.add_job(yazio.safe_sync, CronTrigger(hour=hour, minute=minute, timezone=tz))
+    # Erster Lauf gleich beim Start, danach alle YAZIO_SYNC_INTERVAL_MINUTES Minuten.
+    sched.add_job(
+        yazio.safe_sync,
+        IntervalTrigger(minutes=minutes, timezone=tz),
+        next_run_time=datetime.datetime.now(),
+    )
     sched.start()
     app.state.scheduler = sched
 
