@@ -12,6 +12,8 @@ dist/
 .env
 *.db
 /data/
+# TLS-Material gehoert nicht ins Repo (wird per `tailscale cert` erzeugt)
+certs/
 
 # OS / editor
 .DS_Store
