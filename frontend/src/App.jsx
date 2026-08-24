@@ -118,6 +118,15 @@ const fmtDate = (dISO) => {
   const d = fromISO(dISO);
   return `${WD_LONG[wdIndex(d)]}, ${d.getDate()}.${d.getMonth() + 1}.${d.getFullYear()}`;
 };
+const fmtShort = (dISO) => { const d = fromISO(dISO); return `${d.getDate()}.${d.getMonth() + 1}.`; };
+/* Abstand in Tagen umgangssprachlich: "gestern", "vor 5 Tagen", "vor 3 Wochen". */
+function relLabel(days) {
+  if (days <= 0) return "heute";
+  if (days === 1) return "gestern";
+  if (days < 7) return `vor ${days} Tagen`;
+  const w = Math.round(days / 7);
+  return w === 1 ? "vor 1 Woche" : `vor ${w} Wochen`;
+}
 
 /* ------------------------------ Zahl-Helfer ----------------------------- */
 // Zahlen robust parsen: erlaubt sowohl "91.1" als auch "91,1" (deutsches Komma),
@@ -127,6 +136,7 @@ const num = (v) => { const n = parseLocaleNum(v); return isFinite(n) ? n : 0; };
 const numOrNull = (v) => { if (v === "" || v === null || v === undefined) return null; const n = parseLocaleNum(v); return isFinite(n) ? n : null; };
 const r5 = (n) => Math.round(n / 5) * 5;
 const r50 = (n) => Math.round(n / 50) * 50;
+const r25 = (n) => Math.round(n / 2.5) * 2.5; // 2,5-kg-Schritte, wie die Scheiben in der Halle
 const watt = (ftp, pct) => Math.round(ftp * num(pct) / 100);
 const newId = () => Math.random().toString(36).slice(2, 8);
 const de = (n) => String(n).replace(".", ",");
@@ -264,6 +274,50 @@ function phaseForWeek(w) {
   return "taper";
 }
 const BLOCK_NAME = (w) => (w <= 4 ? "Block 1 · Sweet Spot" : w <= 8 ? "Block 2 · Schwelle" : "Block 3 · VO2max");
+
+/* Reduzierte Wochen (Deload W4/W8, Taper W12).
+   Die Vorgaben dafuer sind eine feste Regel, bewusst ohne KI-Abfrage: in der
+   Halle ist das Netz unzuverlaessig, eine Abfrage kostet Wartezeit und liefert
+   bei gleichem Input unterschiedliche Ergebnisse. */
+const REDUCED_PHASES = ["deload1", "deload2", "taper"];
+const isReducedWeek = (w) => REDUCED_PHASES.includes(phaseForWeek(w));
+/* Anteil der Last aus der letzten normalen Woche, der im Deload gefahren wird. */
+const DELOAD_LOAD_FACTOR = 0.65;
+/* Letzte nicht reduzierte Woche vor w — Referenz fuer die "sonst …"-Zeile. */
+function referenceWeekFor(w) {
+  for (let x = w - 1; x >= 1; x--) if (!isReducedWeek(x)) return x;
+  return 1;
+}
+/* Ein Satz weniger, nie unter 2. Vertraegt auch Bereiche: "4–5" → "3–4". */
+const setsMinusOne = (v) => String(v ?? "").replace(/\d+/g, (m) => String(Math.max(2, Number(m) - 1)));
+
+/* -------------------- Einheit-Identitaet & Tages-Aufloesung --------------
+   sessionKeyOf() liefert einen stabilen Schluessel je Trainingseinheit, damit
+   Notizen an der Einheit haengen und nicht am Wochentag. Die Suffixe
+   "· Deload" und "· Taper" werden abgeschnitten — sonst waere "Sweet Spot ·
+   Deload" in Woche 4 eine andere Einheit als "Sweet Spot" in Woche 3.
+   effectiveDay() beantwortet "was stand an diesem Datum wirklich an?":
+   ein Tages-Ersatz (log[iso].override) schlaegt den Planeintrag. Nur damit
+   findet die Rueckwaertssuche die Notiz auch nach einem Tausch wieder. */
+const stripPhaseSuffix = (name) => String(name || "").replace(/\s*·\s*(Deload|Taper)\s*$/i, "").trim();
+function sessionKeyOf(day) {
+  if (!day || !day.type) return null;
+  if (day.type === "strength") {
+    const s = day.session || stripPhaseSuffix(day.name) || "A";
+    return `strength:${s}`;
+  }
+  if (day.type === "rest") return "rest";
+  return `${day.type}:${stripPhaseSuffix(day.name)}`;
+}
+function effectiveDay(dateISO, plan, settings, log) {
+  const ov = log && log[dateISO] && log[dateISO].override;
+  if (ov) return ov;
+  const inf = dayInfo(dateISO, settings.week1Start);
+  if (!inf.inPlan || !plan || !plan.weeks || !plan.weeks[inf.week - 1]) return null;
+  return plan.weeks[inf.week - 1][inf.wd] || null;
+}
+/* Wie weit die Notizsuche zurueckblickt (gut ein Trainingsblock plus Puffer). */
+const NOTE_LOOKBACK_DAYS = 120;
 
 /* --------------------------- Datei-Export/Import ------------------------ */
 function downloadFile(filename, content, mime) {
@@ -494,7 +548,7 @@ export default function App() {
             <StatsView info={info} settings={settings} plan={plan} nutrition={nutrition} strength={strength} log={log} />
           )}
           {tab === "plan" && (
-            <PlanView plan={plan} setPlan={setPlan} nutrition={nutrition} setNutrition={setNutrition} strength={strength} setStrength={setStrength} flash={flash} />
+            <PlanView plan={plan} setPlan={setPlan} nutrition={nutrition} setNutrition={setNutrition} strength={strength} setStrength={setStrength} settings={settings} log={log} flash={flash} />
           )}
           {tab === "setup" && (
             <SetupView settings={settings} setSettings={setSettings} plan={plan} strength={strength} log={log}
@@ -569,7 +623,7 @@ function TodayView({ info, viewISO, setViewISO, settings, plan, nutrition, stren
       {!day && <Card><div className="trn-empty">Kein Planeintrag für diesen Tag. Du kannst trotzdem Gewicht und Ernährung erfassen.</div></Card>}
 
       {day && day.type === "ride" && <RideCockpit day={day} ftp={settings.ftp} />}
-      {day && day.type === "strength" && <StrengthCard day={day} week={phWeek} strength={strength} viewISO={viewISO} entry={entry} updateLog={updateLog} log={log} />}
+      {day && day.type === "strength" && <StrengthCard day={day} week={phWeek} strength={strength} settings={settings} viewISO={viewISO} entry={entry} updateLog={updateLog} log={log} />}
       {day && day.type === "rest" && (
         <Card accent="var(--faint)"><Eyebrow>Heute</Eyebrow><div className="trn-ride-name">Ruhetag</div>
           <div className="trn-ride-int" style={{ marginTop: 6 }}>Erholung priorisieren — Schlaf, Protein, Flüssigkeit.</div></Card>
@@ -578,6 +632,8 @@ function TodayView({ info, viewISO, setViewISO, settings, plan, nutrition, stren
         <Card accent="var(--accent)"><Eyebrow>Heute · Manuell</Eyebrow><div className="trn-ride-name">{day.name || "Eigene Einheit"}</div>
           {day.note && <div className="trn-ride-int" style={{ marginTop: 6, whiteSpace: "pre-wrap" }}>{day.note}</div>}</Card>
       )}
+
+      {day && <LastTimeCard day={day} viewISO={viewISO} plan={plan} settings={settings} log={log} />}
 
       {!ovEdit && (
         <button className="trn-replace-btn" onClick={() => setOvEdit(true)}>
@@ -608,6 +664,51 @@ function TodayView({ info, viewISO, setViewISO, settings, plan, nutrition, stren
           value={entry.note || ""} onChange={(e) => updateLog(viewISO, { note: e.target.value })} />
       </Card>
     </div>
+  );
+}
+
+/* Notizen haengen an der Einheit, nicht am Wochentag: die Suche geht Tag fuer
+   Tag rueckwaerts und vergleicht ueber sessionKeyOf(), was an dem Datum
+   tatsaechlich anstand (effectiveDay — Tages-Ersatz schlaegt Plan). Dadurch
+   folgt die Notiz der Einheit auch dann, wenn sie im Plan getauscht wurde. */
+function LastTimeCard({ day, viewISO, plan, settings, log }) {
+  const [open, setOpen] = useState(false);
+  const key = sessionKeyOf(day);
+  if (!key || key === "rest") return null;
+
+  const hits = [];
+  const base = fromISO(viewISO);
+  for (let back = 1; back <= NOTE_LOOKBACK_DAYS && hits.length < 4; back++) {
+    const iso = toISO(addDays(base, -back));
+    const note = ((log[iso] || {}).note || "").trim();
+    if (!note) continue;
+    if (sessionKeyOf(effectiveDay(iso, plan, settings, log)) !== key) continue;
+    hits.push({ iso, note, days: back });
+  }
+  if (!hits.length) return null;
+
+  const unit = day.type === "strength" ? `Kraft ${day.session || ""}`.trim() : stripPhaseSuffix(day.name) || "Einheit";
+  const older = hits.slice(1);
+  const row = (h) => (
+    <div className="trn-lastnote" key={h.iso}>
+      <div className="trn-lastnote-meta">{fmtDate(h.iso)} · {relLabel(h.days)}</div>
+      <div className="trn-lastnote-text">{h.note}</div>
+    </div>
+  );
+  return (
+    <Card accent="var(--z1)">
+      <div className="trn-row-between">
+        <Eyebrow>Beim letzten Mal</Eyebrow>
+        <span className="trn-mini-label">{unit}</span>
+      </div>
+      {row(hits[0])}
+      {open && older.map(row)}
+      {older.length > 0 && (
+        <button className="trn-lastnote-more" onClick={() => setOpen(!open)}>
+          {open ? "Ältere ausblenden" : `${older.length} ältere ${older.length === 1 ? "Notiz" : "Notizen"} anzeigen`}
+        </button>
+      )}
+    </Card>
   );
 }
 
@@ -724,16 +825,32 @@ function Gauge({ label, perHour, total }) {
   return <div className="trn-gauge"><div className="trn-gauge-label">{label}</div><div className="trn-gauge-total">{total}</div><div className="trn-gauge-rate">{perHour}</div></div>;
 }
 
-function StrengthCard({ day, week, strength, viewISO, entry, updateLog, log }) {
+function StrengthCard({ day, week, strength, settings, viewISO, entry, updateLog, log }) {
   const isCustom = Array.isArray(day.exercises);
   const sessionKey = day.session || "A";
   const exercises = isCustom ? day.exercises : (strength.sessions[sessionKey] || []);
   const ph = strength.phases[phaseForWeek(week)];
   const sw = entry.strength || {};
-  const suggestFor = (exId) => {
+
+  /* Deload/Taper: die Vorgaben werden aus den eingestellten Werten ABGELEITET,
+     nicht ueberschrieben. Frueher gewann `ex.sets || ph.sets` immer die eigene
+     Angabe der Uebung — der Phasenwert kam nie an, und die Deload-Woche sah
+     genauso aus wie eine normale. Jetzt: ein Satz weniger (min. 2), Wdh.
+     unveraendert, Last ~65 % der letzten normalen Woche, RIR aus der Phase. */
+  const reduced = !isCustom && isReducedWeek(week);
+  const refPh = strength.phases[phaseForWeek(referenceWeekFor(week))];
+
+  /* skipReduced ueberspringt Tage aus reduzierten Wochen. Ohne das wuerde sich
+     die Referenzlast vom letzten Deload ableiten und mit jedem Block weiter
+     nach unten schrauben. */
+  const suggestFor = (exId, skipReduced) => {
     let best = null, bestDate = null;
     for (const [dd, e] of Object.entries(log)) {
       if (dd >= viewISO) continue;
+      if (skipReduced && settings && settings.week1Start) {
+        const inf = dayInfo(dd, settings.week1Start);
+        if (inf.inPlan && isReducedWeek(inf.week)) continue;
+      }
       const v = e.strength && e.strength[exId];
       if (v !== undefined && v !== null && v !== "") { if (!bestDate || dd > bestDate) { bestDate = dd; best = v; } }
     }
@@ -743,26 +860,48 @@ function StrengthCard({ day, week, strength, viewISO, entry, updateLog, log }) {
     <Card accent="var(--violet)">
       <div className="trn-row-between">
         <Eyebrow color="var(--violet)">Heute · Kraft {isCustom ? "individuell" : sessionKey}</Eyebrow>
-        <span className="trn-pill" style={{ color: "var(--violet)", borderColor: "var(--violet)" }}>{isCustom ? "eigene Einheit" : ph.label}</span>
+        <span className="trn-pill" style={{ color: reduced ? "var(--amber)" : "var(--violet)", borderColor: reduced ? "var(--amber)" : "var(--violet)" }}>{isCustom ? "eigene Einheit" : ph.label}</span>
       </div>
       <div className="trn-ride-name">{isCustom ? (day.name || "Individuelles Krafttraining") : `Oberkörper · Session ${sessionKey}`}</div>
-      {!isCustom && <div className="trn-phase-line">Basis: <b>{ph.sets}</b> Sätze · <b>{ph.reps}</b> Wdh. · RIR <b>{ph.rir}</b> · Pause {ph.rest}</div>}
+      {!isCustom && !reduced && <div className="trn-phase-line">Basis: <b>{ph.sets}</b> Sätze · <b>{ph.reps}</b> Wdh. · RIR <b>{ph.rir}</b> · Pause {ph.rest}</div>}
+      {reduced && (
+        <div className="trn-phase-line" style={{ color: "var(--amber)" }}>
+          {ph.label}: <b>ein Satz weniger</b> · Wdh. unverändert · Last ≈ <b>{Math.round(DELOAD_LOAD_FACTOR * 100)} %</b> · RIR <b>{ph.rir}</b> · Pause {ph.rest}
+        </div>
+      )}
       <div className="trn-ex-list">
         {exercises.map((ex) => {
           const sug = suggestFor(ex.id);
           const val = sw[ex.id];
-          const sets = ex.sets || (isCustom ? "–" : ph.sets);
-          const reps = ex.reps || (isCustom ? "–" : ph.reps);
+          // Eigene Werte der Uebung, sonst der Phasenwert der letzten normalen Woche.
+          const normSets = ex.sets || (isCustom ? "–" : refPh.sets);
+          const normReps = ex.reps || (isCustom ? "–" : refPh.reps);
+          let sets = ex.sets || (isCustom ? "–" : ph.sets);
+          let reps = ex.reps || (isCustom ? "–" : ph.reps);
+          let refLoad = null, dlLoad = null;
+          if (reduced) {
+            sets = setsMinusOne(normSets);
+            reps = normReps;
+            const base = numOrNull(suggestFor(ex.id, true));
+            if (base != null && base > 0) { refLoad = base; dlLoad = r25(base * DELOAD_LOAD_FACTOR); }
+          }
           const custom = isCustom || ex.sets || ex.reps;
+          const srColor = reduced ? "var(--amber)" : custom ? "var(--violet)" : undefined;
           return (
             <div className="trn-ex-row" key={ex.id}>
               <div className="trn-ex-name">
                 <span>{ex.name}</span>
-                <span className="trn-ex-sr" style={custom ? { color: "var(--violet)" } : undefined}>{sets}×{reps}</span>
+                <span className="trn-ex-sr" style={srColor ? { color: srColor } : undefined}>{sets}×{reps}</span>
+                {reduced && (
+                  <span className="trn-ex-ref">
+                    sonst {normSets}×{normReps}{dlLoad != null ? ` · Last ≈ ${de(dlLoad)} kg (sonst ${de(refLoad)})` : ""}
+                  </span>
+                )}
                 {ex.note && <span className="trn-ex-note">{ex.note}</span>}
               </div>
               <div className="trn-ex-input">
-                <input className="trn-input trn-input-num" inputMode="decimal" placeholder={sug != null ? String(sug) : "kg"}
+                <input className="trn-input trn-input-num" inputMode="decimal"
+                  placeholder={dlLoad != null ? String(de(dlLoad)) : sug != null ? String(sug) : "kg"}
                   value={val ?? ""} onChange={(e) => updateLog(viewISO, { strength: { ...sw, [ex.id]: e.target.value === "" ? null : e.target.value } })} />
                 <span className="trn-suffix">kg</span>
               </div>
@@ -770,7 +909,11 @@ function StrengthCard({ day, week, strength, viewISO, entry, updateLog, log }) {
           );
         })}
       </div>
-      <div className="trn-hint">{isCustom ? "Frei zusammengestellte Einheit für heute. Leeres kg-Feld schlägt den zuletzt genutzten Wert vor." : "Sätze×Wdh. je Übung stammen aus der Phase — abweichende Werte (violett) setzt du im Plan → Kraft. Leeres kg-Feld schlägt den zuletzt genutzten Wert vor."}</div>
+      <div className="trn-hint">{isCustom
+        ? "Frei zusammengestellte Einheit für heute. Leeres kg-Feld schlägt den zuletzt genutzten Wert vor."
+        : reduced
+          ? `Reduzierte Woche: feste Regel, keine KI-Abfrage — ein Satz weniger (mindestens 2), gleiche Wiederholungen, Last ≈ ${Math.round(DELOAD_LOAD_FACTOR * 100)} % der letzten normalen Woche (frühere Deloads zählen nicht mit). Das kg-Feld schlägt diesen Wert vor.`
+          : "Sätze×Wdh. je Übung stammen aus der Phase — abweichende Werte (violett) setzt du im Plan → Kraft. Leeres kg-Feld schlägt den zuletzt genutzten Wert vor."}</div>
     </Card>
   );
 }
@@ -1032,23 +1175,38 @@ function StrengthProgress({ plan, strength, settings, log }) {
 }
 
 /* ============================== PLAN ==================================== */
-function PlanView({ plan, setPlan, nutrition, setNutrition, strength, setStrength, flash }) {
+function PlanView({ plan, setPlan, nutrition, setNutrition, strength, setStrength, settings, log, flash }) {
   const [section, setSection] = useState("rides");
   return (
     <div className="trn-stack">
       <Seg value={section} onChange={setSection} options={[{ value: "rides", label: "Radplan" }, { value: "strength", label: "Kraft" }, { value: "nutrition", label: "Ernährung" }]} />
-      {section === "rides" && <RidePlanEditor plan={plan} setPlan={setPlan} flash={flash} />}
+      {section === "rides" && <RidePlanEditor plan={plan} setPlan={setPlan} settings={settings} log={log} flash={flash} />}
       {section === "strength" && <StrengthEditor strength={strength} setStrength={setStrength} flash={flash} />}
       {section === "nutrition" && <NutritionEditor nutrition={nutrition} setNutrition={setNutrition} flash={flash} />}
     </div>
   );
 }
 
-function RidePlanEditor({ plan, setPlan, flash }) {
-  const [wk, setWk] = useState(1);
+function RidePlanEditor({ plan, setPlan, settings, log, flash }) {
+  // Startet auf der laufenden Woche, nicht stur auf Woche 1.
+  const [wk, setWk] = useState(() => {
+    const inf = dayInfo(toISO(new Date()), settings.week1Start);
+    return Math.min(12, Math.max(1, inf.week));
+  });
+  const [view, setView] = useState("cal");
   const [openId, setOpenId] = useState(null);
   const [dupTarget, setDupTarget] = useState("");
+  /* Tauschmodus: erst einschalten, dann zwei Kacheln antippen. Bewusst kein
+     Drag & Drop — das funktioniert im Safari-Homescreen-Modus schlecht. */
+  const [swapMode, setSwapMode] = useState(false);
+  const [swapFirst, setSwapFirst] = useState(null);
+
   const week = plan.weeks[wk - 1];
+  const weekStart = addDays(mondayOf(fromISO(settings.week1Start)), (wk - 1) * 7);
+  const dateOf = (idx) => toISO(addDays(weekStart, idx));
+  const todayISO = toISO(new Date());
+  const accentOf = (d) => (d.type === "ride" ? zoneColor(d.ftpHigh) : d.type === "strength" ? "var(--violet)" : "var(--faint)");
+
   const updateDay = (idx, patch) => setPlan((prev) => { const weeks = prev.weeks.map((w) => w.slice()); weeks[wk - 1] = weeks[wk - 1].map((d, i) => (i === idx ? { ...d, ...patch } : d)); return { weeks }; });
   const setDayType = (idx, type) => {
     let base;
@@ -1068,69 +1226,146 @@ function RidePlanEditor({ plan, setPlan, flash }) {
     });
     flash("Getauscht");
   };
+  const endSwap = () => { setSwapMode(false); setSwapFirst(null); };
+  /* Ein Tipp auf eine Kachel: im Normalfall Tag oeffnen, im Tauschmodus erst
+     merken, beim zweiten Tipp tauschen — und den Modus danach beenden. */
+  const tapTile = (idx) => {
+    if (!swapMode) { setOpenId(openId === week[idx].id ? null : week[idx].id); return; }
+    if (swapFirst === null) { setSwapFirst(idx); return; }
+    if (swapFirst === idx) { setSwapFirst(null); return; }
+    swapDay(swapFirst, idx);
+    endSwap(); setOpenId(null);
+  };
   const resetWeek = () => { setPlan((prev) => { const weeks = prev.weeks.slice(); weeks[wk - 1] = generateWeek(wk); return { weeks }; }); flash(`Woche ${wk} zurückgesetzt`); };
   const duplicateWeek = () => {
     const t = Number(dupTarget); if (!t || t === wk) return;
     setPlan((prev) => { const weeks = prev.weeks.slice(); weeks[t - 1] = plan.weeks[wk - 1].map((d, i) => ({ ...d, id: `w${t}-${i}`, weekday: WD[i] })); return { weeks }; });
     flash(`Woche ${wk} → Woche ${t} kopiert`); setDupTarget("");
   };
+
+  /* Der Bearbeitungsteil eines Tages — identisch in Listen- und Kalenderansicht. */
+  const dayBody = (d, idx) => (
+    <div className="trn-day-body">
+      <div className="trn-mini-label" style={{ marginBottom: 6 }}>Art des Tages</div>
+      <Seg value={d.type} onChange={(t) => setDayType(idx, t)} options={[{ value: "ride", label: "Rad" }, { value: "strength", label: "Kraft" }, { value: "rest", label: "Ruhetag" }]} />
+      {d.type === "ride" && (
+        <div className="trn-edit-grid">
+          <Field label="Name" value={d.name} onChange={(v) => updateDay(idx, { name: v })} style={{ gridColumn: "1 / -1" }} />
+          <Field label="Dauer" type="number" suffix="h" value={d.duration} onChange={(v) => updateDay(idx, { duration: v })} />
+          <Field label="Zone" value={d.zone} onChange={(v) => updateDay(idx, { zone: v })} />
+          <Field label="%FTP von" type="number" value={d.ftpLow} onChange={(v) => updateDay(idx, { ftpLow: v })} />
+          <Field label="%FTP bis" type="number" value={d.ftpHigh} onChange={(v) => updateDay(idx, { ftpHigh: v })} />
+          <label className="trn-field" style={{ gridColumn: "1 / -1" }}><span className="trn-field-label">Intervallstruktur</span>
+            <textarea className="trn-textarea sm" value={d.intervals} onChange={(e) => updateDay(idx, { intervals: e.target.value })} /></label>
+          <Field label="Carbs" type="number" suffix="g/h" value={d.carbsPerHour} onChange={(v) => updateDay(idx, { carbsPerHour: v })} />
+          <Field label="Flüssigkeit" type="number" suffix="ml/h" value={d.fluidPerHour} onChange={(v) => updateDay(idx, { fluidPerHour: v })} />
+          <Field label="Natrium" type="number" suffix="mg/h" value={d.sodiumPerHour} onChange={(v) => updateDay(idx, { sodiumPerHour: v === "" ? null : v })} />
+        </div>
+      )}
+      {d.type === "strength" && (
+        <div className="trn-edit-grid" style={{ marginTop: 10 }}>
+          <label className="trn-field"><span className="trn-field-label">Session</span>
+            <select className="trn-select" value={d.session} onChange={(e) => updateDay(idx, { session: e.target.value })}><option value="A">A</option><option value="B">B</option></select></label>
+        </div>
+      )}
+      <div className="trn-mini-label" style={{ margin: "12px 0 6px" }}>Ernährungstyp (Kalorienziel)</div>
+      <select className="trn-select" style={{ marginTop: 0 }} value={d.dayType} onChange={(e) => updateDay(idx, { dayType: e.target.value })}>
+        {DAYTYPE_ORDER.map((k) => <option key={k} value={k}>{DAYTYPE_SHORT[k]}</option>)}
+      </select>
+      <div className="trn-day-actions">
+        <label className="trn-move"><span>Tauschen mit</span>
+          <select className="trn-select sm" value="" onChange={(e) => e.target.value !== "" && swapDay(idx, Number(e.target.value))}>
+            <option value="">Tag wählen…</option>
+            {WD.map((w, i) => i !== idx && <option key={i} value={i}>{w}</option>)}
+          </select>
+        </label>
+        <Btn small onClick={() => resetDay(idx)}>Tag zurücksetzen</Btn>
+      </div>
+    </div>
+  );
+
+  const openIdx = week.findIndex((d) => d.id === openId);
+
   return (
     <>
       <Card>
-        <div className="trn-weeksel">
+        <Seg value={view} onChange={(v) => { setView(v); endSwap(); }} options={[{ value: "cal", label: "Kalender" }, { value: "list", label: "Liste" }]} />
+        <div className="trn-weeksel" style={{ marginTop: 12 }}>
           <button className="trn-nav-btn" onClick={() => setWk(Math.max(1, wk - 1))}>‹</button>
           <div className="trn-weeksel-mid"><div className="trn-weeksel-num">Woche {wk}</div><div className="trn-mini-label">{BLOCK_NAME(wk)}{wk === 4 || wk === 8 ? " · Deload" : wk === 12 ? " · Taper" : ""}</div></div>
           <button className="trn-nav-btn" onClick={() => setWk(Math.min(12, wk + 1))}>›</button>
         </div>
-        <div className="trn-weekdots">{Array.from({ length: 12 }, (_, i) => <button key={i} className={`trn-weekdot ${wk === i + 1 ? "active" : ""}`} onClick={() => setWk(i + 1)}>{i + 1}</button>)}</div>
+        <div className="trn-weekdots">{Array.from({ length: 12 }, (_, i) => <button key={i} className={`trn-weekdot ${wk === i + 1 ? "active" : ""}`} onClick={() => { setWk(i + 1); setOpenId(null); endSwap(); }}>{i + 1}</button>)}</div>
       </Card>
 
-      {week.map((d, idx) => (
-        <Card key={d.id} accent={d.type === "ride" ? zoneColor(d.ftpHigh) : d.type === "strength" ? "var(--violet)" : "var(--faint)"} style={{ padding: 0 }}>
+      {view === "cal" && (
+        <Card>
+          <div className="trn-row-between">
+            <Eyebrow>{fmtShort(dateOf(0))}–{fmtShort(dateOf(6))}</Eyebrow>
+            <Btn small variant={swapMode ? "primary" : "ghost"} onClick={() => (swapMode ? endSwap() : setSwapMode(true))}>
+              {swapMode ? "Abbrechen" : "Tauschen"}
+            </Btn>
+          </div>
+          {swapMode && (
+            <div className="trn-swap-hint">
+              {swapFirst === null ? "Ersten Tag antippen …" : `${WD_LONG[swapFirst]} gewählt — jetzt den zweiten Tag antippen.`}
+            </div>
+          )}
+          <div className="trn-calgrid">
+            {week.map((d, idx) => {
+              const iso = dateOf(idx);
+              const e = log[iso] || {};
+              const col = accentOf(d);
+              const cls = ["trn-cal-tile"];
+              if (swapFirst === idx) cls.push("sel");
+              if (!swapMode && openId === d.id) cls.push("open");
+              if (iso === todayISO) cls.push("today");
+              return (
+                <button key={d.id} className={cls.join(" ")} style={{ borderTopColor: col }} title={d.name} onClick={() => tapTile(idx)}>
+                  <span className="trn-cal-top">
+                    <span className="trn-cal-wd">{WD[idx]}</span>
+                    <span className="trn-cal-date">{fmtShort(iso)}</span>
+                  </span>
+                  <span className="trn-cal-name">{stripPhaseSuffix(d.name)}</span>
+                  <span className="trn-cal-dur" style={{ color: col }}>
+                    {d.type === "ride" ? `${de(num(d.duration))} h` : d.type === "strength" ? `Kraft ${d.session}` : "—"}
+                  </span>
+                  <span className="trn-cal-dots">
+                    {!!e.done && <i className="trn-cal-dot" style={{ background: "var(--green)" }} />}
+                    {!!e.note && <i className="trn-cal-dot" style={{ background: "var(--accent)" }} />}
+                    {!!e.override && <i className="trn-cal-dot" style={{ background: "var(--violet)" }} />}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          <div className="trn-cal-legend">
+            <span><i style={{ background: "var(--green)" }} />absolviert</span>
+            <span><i style={{ background: "var(--accent)" }} />Notiz</span>
+            <span><i style={{ background: "var(--violet)" }} />Tages-Ersatz</span>
+          </div>
+        </Card>
+      )}
+
+      {view === "cal" && !swapMode && openIdx >= 0 && (
+        <Card accent={accentOf(week[openIdx])} style={{ padding: 0 }}>
+          <button className="trn-day-head" onClick={() => setOpenId(null)}>
+            <span className="trn-day-wd">{WD[openIdx]}</span>
+            <span className="trn-day-name">{week[openIdx].name}{week[openIdx].type === "ride" ? ` · ${de(num(week[openIdx].duration))} h` : week[openIdx].type === "strength" ? ` · ${week[openIdx].session}` : ""}</span>
+            <span className="trn-day-chev">▾</span>
+          </button>
+          {dayBody(week[openIdx], openIdx)}
+        </Card>
+      )}
+
+      {view === "list" && week.map((d, idx) => (
+        <Card key={d.id} accent={accentOf(d)} style={{ padding: 0 }}>
           <button className="trn-day-head" onClick={() => setOpenId(openId === d.id ? null : d.id)}>
             <span className="trn-day-wd">{WD[idx]}</span>
             <span className="trn-day-name">{d.name}{d.type === "ride" ? ` · ${de(num(d.duration))} h` : d.type === "strength" ? ` · ${d.session}` : ""}</span>
             <span className="trn-day-chev">{openId === d.id ? "▾" : "▸"}</span>
           </button>
-          {openId === d.id && (
-            <div className="trn-day-body">
-              <div className="trn-mini-label" style={{ marginBottom: 6 }}>Art des Tages</div>
-              <Seg value={d.type} onChange={(t) => setDayType(idx, t)} options={[{ value: "ride", label: "Rad" }, { value: "strength", label: "Kraft" }, { value: "rest", label: "Ruhetag" }]} />
-              {d.type === "ride" && (
-                <div className="trn-edit-grid">
-                  <Field label="Name" value={d.name} onChange={(v) => updateDay(idx, { name: v })} style={{ gridColumn: "1 / -1" }} />
-                  <Field label="Dauer" type="number" suffix="h" value={d.duration} onChange={(v) => updateDay(idx, { duration: v })} />
-                  <Field label="Zone" value={d.zone} onChange={(v) => updateDay(idx, { zone: v })} />
-                  <Field label="%FTP von" type="number" value={d.ftpLow} onChange={(v) => updateDay(idx, { ftpLow: v })} />
-                  <Field label="%FTP bis" type="number" value={d.ftpHigh} onChange={(v) => updateDay(idx, { ftpHigh: v })} />
-                  <label className="trn-field" style={{ gridColumn: "1 / -1" }}><span className="trn-field-label">Intervallstruktur</span>
-                    <textarea className="trn-textarea sm" value={d.intervals} onChange={(e) => updateDay(idx, { intervals: e.target.value })} /></label>
-                  <Field label="Carbs" type="number" suffix="g/h" value={d.carbsPerHour} onChange={(v) => updateDay(idx, { carbsPerHour: v })} />
-                  <Field label="Flüssigkeit" type="number" suffix="ml/h" value={d.fluidPerHour} onChange={(v) => updateDay(idx, { fluidPerHour: v })} />
-                  <Field label="Natrium" type="number" suffix="mg/h" value={d.sodiumPerHour} onChange={(v) => updateDay(idx, { sodiumPerHour: v === "" ? null : v })} />
-                </div>
-              )}
-              {d.type === "strength" && (
-                <div className="trn-edit-grid" style={{ marginTop: 10 }}>
-                  <label className="trn-field"><span className="trn-field-label">Session</span>
-                    <select className="trn-select" value={d.session} onChange={(e) => updateDay(idx, { session: e.target.value })}><option value="A">A</option><option value="B">B</option></select></label>
-                </div>
-              )}
-              <div className="trn-mini-label" style={{ margin: "12px 0 6px" }}>Ernährungstyp (Kalorienziel)</div>
-              <select className="trn-select" style={{ marginTop: 0 }} value={d.dayType} onChange={(e) => updateDay(idx, { dayType: e.target.value })}>
-                {DAYTYPE_ORDER.map((k) => <option key={k} value={k}>{DAYTYPE_SHORT[k]}</option>)}
-              </select>
-              <div className="trn-day-actions">
-                <label className="trn-move"><span>Tauschen mit</span>
-                  <select className="trn-select sm" value="" onChange={(e) => e.target.value !== "" && swapDay(idx, Number(e.target.value))}>
-                    <option value="">Tag wählen…</option>
-                    {WD.map((w, i) => i !== idx && <option key={i} value={i}>{w}</option>)}
-                  </select>
-                </label>
-                <Btn small onClick={() => resetDay(idx)}>Tag zurücksetzen</Btn>
-              </div>
-            </div>
-          )}
+          {openId === d.id && dayBody(d, idx)}
         </Card>
       ))}
 
@@ -1526,6 +1761,34 @@ function Style() {
     .trn-weekdots{display:grid;grid-template-columns:repeat(12,1fr);gap:4px;margin-top:12px;}
     .trn-weekdot{aspect-ratio:1;border:1px solid var(--border2);background:var(--surface2);color:var(--dim);border-radius:7px;font-size:11px;font-family:var(--mono);cursor:pointer;padding:0;}
     .trn-weekdot.active{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700;}
+    /* Kalender-Wochenansicht: 7 quadratische Kacheln, 4 Spalten passen aufs iPhone. */
+    .trn-calgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:12px;}
+    .trn-cal-tile{aspect-ratio:1;display:flex;flex-direction:column;align-items:stretch;gap:1px;background:var(--surface2);border:1px solid var(--border2);border-top:3px solid var(--border2);border-radius:10px;padding:5px 5px 4px;color:var(--txt);cursor:pointer;text-align:left;font-family:var(--sans);overflow:hidden;}
+    .trn-cal-tile:active{background:var(--raised);}
+    .trn-cal-tile.today{box-shadow:inset 0 0 0 1px var(--accent);}
+    .trn-cal-tile.open{background:var(--raised);border-color:var(--accent);}
+    .trn-cal-tile.sel{background:rgba(76,144,217,0.18);border-color:var(--accent);}
+    .trn-cal-top{display:flex;justify-content:space-between;align-items:baseline;gap:3px;}
+    .trn-cal-wd{font-family:var(--mono);font-size:10.5px;font-weight:700;}
+    .trn-cal-date{font-family:var(--mono);font-size:9px;color:var(--faint);}
+    .trn-cal-name{flex:1;min-height:0;max-height:2.4em;font-size:9.5px;line-height:1.2;margin-top:2px;overflow:hidden;overflow-wrap:anywhere;}
+    .trn-cal-dur{font-family:var(--mono);font-size:9.5px;font-weight:600;white-space:nowrap;margin-top:auto;}
+    .trn-cal-dots{display:flex;gap:3px;height:5px;align-items:center;margin-top:1px;}
+    .trn-cal-dot{width:5px;height:5px;border-radius:50%;display:inline-block;}
+    .trn-cal-legend{display:flex;gap:11px;margin-top:10px;flex-wrap:wrap;}
+    .trn-cal-legend span{display:flex;align-items:center;gap:5px;font-size:10.5px;color:var(--faint);}
+    .trn-cal-legend i{width:6px;height:6px;border-radius:50%;display:inline-block;}
+    .trn-swap-hint{margin-top:10px;background:rgba(76,144,217,0.12);border:1px solid rgba(76,144,217,0.4);border-radius:9px;padding:8px 11px;font-size:12px;color:#bcd6f2;}
+
+    /* "Beim letzten Mal" — Notiz der letzten gleichen Einheit. */
+    .trn-lastnote{margin-top:10px;padding-top:10px;border-top:1px solid var(--border);}
+    .trn-lastnote:first-of-type{border-top:none;padding-top:0;}
+    .trn-lastnote-meta{font-family:var(--mono);font-size:10.5px;color:var(--faint);letter-spacing:.2px;}
+    .trn-lastnote-text{font-size:13px;line-height:1.5;color:var(--txt);opacity:.92;margin-top:4px;white-space:pre-wrap;}
+    .trn-lastnote-more{margin-top:10px;background:none;border:none;color:var(--accent);font-size:11.5px;font-weight:600;cursor:pointer;padding:0;font-family:var(--sans);}
+
+    .trn-ex-ref{font-family:var(--mono);font-size:10px;color:var(--amber);opacity:.85;margin-top:1px;}
+
     .trn-day-head{display:flex;align-items:center;gap:10px;width:100%;background:none;border:none;color:var(--txt);padding:13px 14px;cursor:pointer;text-align:left;}
     .trn-day-wd{font-family:var(--mono);font-size:12px;font-weight:700;color:var(--faint);width:24px;flex:none;}
     .trn-day-name{flex:1;font-size:14px;font-weight:600;}
