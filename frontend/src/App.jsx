@@ -319,6 +319,43 @@ function effectiveDay(dateISO, plan, settings, log) {
 /* Wie weit die Notizsuche zurueckblickt (gut ein Trainingsblock plus Puffer). */
 const NOTE_LOOKBACK_DAYS = 120;
 
+/* ------------------------- Einheiten-Vorlagen ---------------------------
+   Alle im Plan vorkommenden Einheiten, dedupliziert — damit sich ein Tag
+   spontan gegen eine bereits etablierte Einheit tauschen laesst, ohne
+   Dauer, Zonen, Intervalle und Fueling neu eintippen zu muessen.
+   Dedupliziert wird ueber die inhaltlich relevanten Felder: derselbe Name
+   mit anderer Dauer (z. B. Grundlage 1,75 h und 3,5 h) bleibt eine eigene
+   Vorlage, weil genau diese Varianten die Auswahl ausmachen. */
+function unitSignature(d) {
+  if (d.type === "strength") return `strength:${d.session || "A"}`;
+  return [d.type, d.name, num(d.duration), d.zone, d.ftpLow, d.ftpHigh].join("|");
+}
+function planUnits(plan) {
+  const seen = new Map();
+  ((plan && plan.weeks) || []).forEach((week) => (week || []).forEach((d) => {
+    if (!d || !d.type || d.type === "rest") return;
+    const sig = unitSignature(d);
+    if (seen.has(sig)) return;
+    // id/weekday gehoeren zum Planplatz, nicht zur Einheit — nicht mitnehmen.
+    const { id, weekday, ...unit } = d;
+    seen.set(sig, { ...unit, __sig: sig });
+  }));
+  const rank = { strength: 0, ride: 1, custom: 2 };
+  return [...seen.values()].sort((a, b) => {
+    const ra = rank[a.type] ?? 9, rb = rank[b.type] ?? 9;
+    if (ra !== rb) return ra - rb;
+    const na = String(a.name || ""), nb = String(b.name || "");
+    if (na !== nb) return na.localeCompare(nb, "de");
+    return num(a.duration) - num(b.duration);
+  });
+}
+/* Beschriftung fuer die Auswahlliste: das, wonach man sucht. */
+function unitLabel(u) {
+  if (u.type === "strength") return `Krafttraining ${u.session || "A"}`;
+  if (u.type === "ride") return `${u.name} · ${de(num(u.duration))} h`;
+  return u.name || "Eigene Einheit";
+}
+
 /* --------------------------- Datei-Export/Import ------------------------ */
 function downloadFile(filename, content, mime) {
   try {
@@ -641,7 +678,7 @@ function TodayView({ info, viewISO, setViewISO, settings, plan, nutrition, stren
         </button>
       )}
       {ovEdit && (
-        <OverrideEditor initial={entry.override || planDay} strength={strength}
+        <OverrideEditor initial={entry.override || planDay} strength={strength} plan={plan}
           onSave={saveOverride} onCancel={() => setOvEdit(false)} />
       )}
 
@@ -712,7 +749,7 @@ function LastTimeCard({ day, viewISO, plan, settings, log }) {
   );
 }
 
-function OverrideEditor({ initial, strength, onSave, onCancel }) {
+function OverrideEditor({ initial, strength, plan, onSave, onCancel }) {
   // Vorlage für eine frei zusammengestellte Krafteinheit: die geplanten
   // Übungen der Session A als Startpunkt, komplett editierbar.
   const seedStrengthExercises = () => (strength.sessions.A || []).map((e) => ({ id: newId(), name: e.name, sets: "", reps: "" }));
@@ -733,9 +770,38 @@ function OverrideEditor({ initial, strength, onSave, onCancel }) {
   const exUpd = (id, patch) => set({ exercises: d.exercises.map((e) => (e.id === id ? { ...e, ...patch } : e)) });
   const exDel = (id) => set({ exercises: d.exercises.filter((e) => e.id !== id) });
   const exAdd = () => set({ exercises: [...(d.exercises || []), { id: newId(), name: "", sets: "", reps: "" }] });
+
+  /* Bekannte Einheiten aus dem Plan als Vorlage. Uebernehmen fuellt alle
+     Felder — danach laesst sich unten noch alles anpassen (z. B. die Dauer),
+     bevor gespeichert wird. */
+  const units = planUnits(plan);
+  const [pick, setPick] = useState("");
+  const applyUnit = (sig) => {
+    setPick(sig);
+    const u = units.find((x) => x.__sig === sig);
+    if (!u) return;
+    const { __sig, ...unit } = u;
+    setD(unit.type === "strength" ? { ...unit, name: unit.name || "Krafttraining" } : { ...unit });
+  };
+
   return (
     <Card accent="var(--accent)">
       <Eyebrow color="var(--accent)">Einheit ersetzen (nur dieser Tag)</Eyebrow>
+      {units.length > 0 && (
+        <div className="trn-unitpick">
+          <div className="trn-mini-label">Bekannte Einheit übernehmen</div>
+          <select className="trn-select" value={pick} onChange={(e) => applyUnit(e.target.value)}>
+            <option value="">Aus dem Plan wählen…</option>
+            <optgroup label="Kraft">
+              {units.filter((u) => u.type === "strength").map((u) => <option key={u.__sig} value={u.__sig}>{unitLabel(u)}</option>)}
+            </optgroup>
+            <optgroup label="Rad">
+              {units.filter((u) => u.type !== "strength").map((u) => <option key={u.__sig} value={u.__sig}>{unitLabel(u)}</option>)}
+            </optgroup>
+          </select>
+          <div className="trn-hint" style={{ marginTop: 6 }}>Übernimmt Dauer, Zonen, Intervalle, Fueling und Ernährungstyp. Alles darunter bleibt danach anpassbar.</div>
+        </div>
+      )}
       <div style={{ marginTop: 10 }}>
         <Seg value={d.type} onChange={changeType}
           options={[{ value: "ride", label: "Rad" }, { value: "strength", label: "Kraft" }, { value: "custom", label: "Frei" }, { value: "rest", label: "Ruhe" }]} />
@@ -1227,6 +1293,22 @@ function RidePlanEditor({ plan, setPlan, settings, log, flash }) {
     flash("Getauscht");
   };
   const endSwap = () => { setSwapMode(false); setSwapFirst(null); };
+  /* Einen Planplatz komplett durch eine bekannte Einheit ersetzen. Der Tag
+     wird ausgetauscht, nicht gemerged — sonst blieben Felder der alten
+     Einheit (z. B. Intervalle einer Radeinheit) an einer Krafteinheit haengen.
+     id und weekday gehoeren zum Platz und bleiben deshalb erhalten. */
+  const units = planUnits(plan);
+  const applyUnitToDay = (idx, sig) => {
+    const u = units.find((x) => x.__sig === sig);
+    if (!u) return;
+    const { __sig, ...unit } = u;
+    setPlan((prev) => {
+      const weeks = prev.weeks.map((w) => w.slice());
+      weeks[wk - 1] = weeks[wk - 1].map((d, i) => (i === idx ? { ...unit, id: `w${wk}-${i}`, weekday: WD[i] } : d));
+      return { weeks };
+    });
+    flash("Einheit übernommen");
+  };
   /* Ein Tipp auf eine Kachel: im Normalfall Tag oeffnen, im Tauschmodus erst
      merken, beim zweiten Tipp tauschen — und den Modus danach beenden. */
   const tapTile = (idx) => {
@@ -1246,6 +1328,21 @@ function RidePlanEditor({ plan, setPlan, settings, log, flash }) {
   /* Der Bearbeitungsteil eines Tages — identisch in Listen- und Kalenderansicht. */
   const dayBody = (d, idx) => (
     <div className="trn-day-body">
+      {units.length > 0 && (
+        <div className="trn-unitpick" style={{ marginTop: 0, marginBottom: 14 }}>
+          <div className="trn-mini-label">Bekannte Einheit übernehmen</div>
+          <select className="trn-select" value="" onChange={(e) => e.target.value !== "" && applyUnitToDay(idx, e.target.value)}>
+            <option value="">Aus dem Plan wählen…</option>
+            <optgroup label="Kraft">
+              {units.filter((u) => u.type === "strength").map((u) => <option key={u.__sig} value={u.__sig}>{unitLabel(u)}</option>)}
+            </optgroup>
+            <optgroup label="Rad">
+              {units.filter((u) => u.type !== "strength").map((u) => <option key={u.__sig} value={u.__sig}>{unitLabel(u)}</option>)}
+            </optgroup>
+          </select>
+          <div className="trn-hint" style={{ marginTop: 6 }}>Ersetzt diesen Tag dauerhaft im Plan.</div>
+        </div>
+      )}
       <div className="trn-mini-label" style={{ marginBottom: 6 }}>Art des Tages</div>
       <Seg value={d.type} onChange={(t) => setDayType(idx, t)} options={[{ value: "ride", label: "Rad" }, { value: "strength", label: "Kraft" }, { value: "rest", label: "Ruhetag" }]} />
       {d.type === "ride" && (
@@ -1778,6 +1875,9 @@ function Style() {
     .trn-cal-legend{display:flex;gap:11px;margin-top:10px;flex-wrap:wrap;}
     .trn-cal-legend span{display:flex;align-items:center;gap:5px;font-size:10.5px;color:var(--faint);}
     .trn-cal-legend i{width:6px;height:6px;border-radius:50%;display:inline-block;}
+    .trn-unitpick{margin-top:12px;padding:10px 11px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;}
+    .trn-unitpick .trn-select{margin-top:6px;}
+    .trn-unitpick .trn-hint{margin-top:6px;}
     .trn-swap-hint{margin-top:10px;background:rgba(76,144,217,0.12);border:1px solid rgba(76,144,217,0.4);border-radius:9px;padding:8px 11px;font-size:12px;color:#bcd6f2;}
 
     /* "Beim letzten Mal" — Notiz der letzten gleichen Einheit. */

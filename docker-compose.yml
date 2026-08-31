@@ -7,7 +7,7 @@ services:
       - "8000:8000"
     volumes:
       - cockpit-data:/data
-    restart: unless-stopped
+    restart: always
 
   caddy:
     image: caddy:2
@@ -19,7 +19,7 @@ services:
       - ./certs:/certs
       - caddy-data:/data
       - caddy-config:/config
-    restart: unless-stopped
+    restart: always
 
 volumes:
   cockpit-data:
