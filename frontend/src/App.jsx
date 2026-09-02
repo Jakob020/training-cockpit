@@ -1107,7 +1107,6 @@ function NutritionCard({ day, nutrition, entry, onTrack }) {
     { key: "carbs", label: "Carbs", target: `~${t.carbs} g`, val: entry.carbs, mid: t.carbs, suf: "g" },
     { key: "fat", label: "Fett", target: `~${t.fat} g`, val: entry.fat, mid: t.fat, suf: "g" },
   ];
-  const anyValue = rows.some((r) => numOrNull(r.val) != null);
   return (
     <Card>
       <div className="trn-row-between">
@@ -1131,7 +1130,6 @@ function NutritionCard({ day, nutrition, entry, onTrack }) {
           );
         })}
       </div>
-      {!anyValue && <div className="trn-hint" style={{ marginTop: 10 }}>Für diesen Tag liegen noch keine Werte vor. Tracke dein Essen oder warte auf den Yazio-Sync.</div>}
       <button className="trn-food-btn" onClick={onTrack}>Essen tracken</button>
     </Card>
   );
@@ -1474,6 +1472,17 @@ function FoodPicker({ pick, setPick, onConfirm, busy, forRecipe }) {
   const grams = num(pick.amount);
   const kcal = kcalOf(pick.per100, grams);
   const quick = [pick.serving, 50, 100, 150, 200].filter((v, i, a) => v && a.indexOf(v) === i).slice(0, 4);
+  /* Naehrwerte fuer die eingetippte Menge — sie rechnen live mit, damit die
+     Entscheidung ueber die Portion vor dem Speichern faellt und nicht danach. */
+  const macros = [
+    { key: "protein", label: "Protein" },
+    { key: "carbs", label: "Carbs" },
+    { key: "fat", label: "Fett" },
+  ].map((m) => {
+    const v = scaleMacro(pick.per100, m.key, grams);
+    return { ...m, value: v === null ? null : Math.round(v * 10) / 10 };
+  });
+  const hasAny = kcal != null || macros.some((m) => m.value != null);
   return (
     <div className="trn-food-sheet">
       <div className="trn-food-sheet-inner">
@@ -1485,6 +1494,16 @@ function FoodPicker({ pick, setPick, onConfirm, busy, forRecipe }) {
           <span className="trn-suffix">g</span>
           <span className="trn-food-kcal">{kcal != null ? `${de(kcal)} kcal` : "keine Nährwerte"}</span>
         </div>
+        {hasAny && (
+          <div className="trn-food-macros">
+            {macros.map((m) => (
+              <div className="trn-food-macro" key={m.key}>
+                <span className="trn-food-macro-val">{m.value != null ? de(m.value) : "—"}<span className="trn-food-macro-u">g</span></span>
+                <span className="trn-food-macro-lab">{m.label}</span>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="trn-food-quick">
           {quick.map((v) => (
             <button key={v} className="trn-food-quick-btn" onClick={() => setPick({ ...pick, amount: de(String(v)) })}>
@@ -2214,6 +2233,8 @@ function SetupView({ settings, setSettings, plan, strength, log, setPlan, setNut
   const [preview, setPreview] = useState(null);
   const [yzStatus, setYzStatus] = useState(null);
   const [syncing, setSyncing] = useState(false);
+  const [showImport, setShowImport] = useState(false);
+  const [showErr, setShowErr] = useState(false);
   const mon = mondayOf(fromISO(settings.week1Start));
 
   const refreshMeta = async () => {
@@ -2280,22 +2301,30 @@ function SetupView({ settings, setSettings, plan, strength, log, setPlan, setNut
 
       {/* Yazio-Sync */}
       <Card accent="var(--green)">
-        <Eyebrow color="var(--green)">Yazio-Sync</Eyebrow>
-        <div className="trn-hint" style={{ marginTop: 4 }}>
-          Der Server holt deine Tageswerte automatisch alle 30 Minuten (inoffizielle Yazio-API, Zugangsdaten in der .env). Du kannst jederzeit manuell synchronisieren.
-        </div>
-        <div style={{ display: "flex", gap: 8, marginTop: 12, alignItems: "center", flexWrap: "wrap" }}>
-          <Btn variant="primary" onClick={syncYazio} disabled={syncing}>{syncing ? "Synchronisiere…" : "Jetzt von Yazio synchronisieren"}</Btn>
+        <div className="trn-row-between">
+          <Eyebrow color="var(--green)">Yazio-Sync</Eyebrow>
           {yzStatus && yzStatus.lastSync && (
-            <span className="trn-mini-label">
-              zuletzt {yzStatus.lastSync.replace("T", " ")} · {yzStatus.ok === false ? "Fehler" : `${yzStatus.updated ?? 0} Tage`}
+            <span className="trn-mini-label" title={yzStatus.ok === false ? yzStatus.error : ""}>
+              {yzStatus.lastSync.slice(0, 16).replace("T", " ")} · {yzStatus.ok === false ? "Fehler" : `${yzStatus.updated ?? 0} Tage`}
             </span>
           )}
         </div>
-        {yzStatus && yzStatus.ok === false && <div className="trn-warn" style={{ marginTop: 10 }}>Letzter Sync-Fehler: {yzStatus.error}</div>}
-        <div className="trn-hint" style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
-          Fallback: Werte manuell einfügen (überschreibt die betroffenen Tage). Format je Zeile mit Semikolon: <b>Datum ; kcal ; Protein ; Carbs ; Fett</b>
+        <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <Btn variant="primary" onClick={syncYazio} disabled={syncing}>{syncing ? "Synchronisiere…" : "Synchronisieren"}</Btn>
+          <button className="trn-linkbtn" onClick={() => setShowImport(!showImport)}>
+            {showImport ? "Manuell ausblenden" : "Manuell eintragen"}
+          </button>
         </div>
+        {/* Fehlertext nur auf Wunsch — er ist lang und im Alltag nicht von
+            Interesse, beim Debuggen aber unverzichtbar. */}
+        {yzStatus && yzStatus.ok === false && (
+          <div className="trn-yz-err" onClick={() => setShowErr(!showErr)}>
+            {showErr ? yzStatus.error : "Letzter Sync fehlgeschlagen — antippen für Details"}
+          </div>
+        )}
+        {showImport && (
+        <>
+        <div className="trn-mini-label" style={{ marginTop: 12 }}>Datum ; kcal ; Protein ; Carbs ; Fett</div>
         <textarea className="trn-textarea" style={{ minHeight: 90, fontFamily: "var(--mono)", fontSize: 12 }}
           placeholder={"2026-08-04 ; 2480 ; 196 ; 320 ; 74\n2026-08-05 ; 1950 ; 198 ; 150 ; 62"}
           value={importText} onChange={(e) => setImportText(e.target.value)} />
@@ -2314,7 +2343,9 @@ function SetupView({ settings, setSettings, plan, strength, log, setPlan, setNut
             {preview.length > 6 && <div className="trn-mini-label">… und {preview.length - 6} weitere</div>}
           </div>
         )}
-        {preview && preview.length === 0 && <div className="trn-mini-label" style={{ marginTop: 8 }}>Keine gültigen Zeilen erkannt — prüfe das Format.</div>}
+        {preview && preview.length === 0 && <div className="trn-mini-label" style={{ marginTop: 8 }}>Keine gültigen Zeilen erkannt.</div>}
+        </>
+        )}
       </Card>
 
       <Card>
@@ -2613,6 +2644,13 @@ function Style() {
     .trn-food-amount{display:flex;align-items:center;gap:7px;margin-top:12px;}
     .trn-food-amount .trn-input{width:84px;text-align:right;font-family:var(--mono);}
     .trn-food-kcal{margin-left:auto;font-family:var(--mono);font-size:14px;font-weight:700;color:var(--accent);}
+    .trn-food-macros{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:10px;padding:9px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);}
+    .trn-food-macro{text-align:center;}
+    .trn-food-macro-val{display:block;font-family:var(--mono);font-size:16px;font-weight:700;line-height:1.1;}
+    .trn-food-macro-u{font-size:10px;color:var(--faint);margin-left:1px;}
+    .trn-food-macro-lab{display:block;font-size:9.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.5px;margin-top:2px;}
+    .trn-linkbtn{background:none;border:none;color:var(--accent);font-size:12.5px;font-weight:600;cursor:pointer;padding:4px 2px;font-family:var(--sans);}
+    .trn-yz-err{margin-top:10px;background:rgba(222,90,90,0.10);border:1px solid rgba(222,90,90,0.35);color:#f0b5b5;font-size:11px;padding:8px 11px;border-radius:9px;line-height:1.45;cursor:pointer;word-break:break-word;}
     .trn-food-quick{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;}
     .trn-food-quick-btn{background:var(--surface2);border:1px solid var(--border2);color:var(--dim);border-radius:8px;padding:7px 10px;font-size:11.5px;cursor:pointer;font-family:var(--sans);}
     .trn-food-meals{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;}
