@@ -23,7 +23,13 @@ Bewusste Entscheidungen:
 import json
 import os
 
-MODEL = "claude-sonnet-5"
+# Opus 5 statt Sonnet: Genauigkeit geht hier vor Kosten. Bei Hausmannskost
+# mit Verhaeltnisangaben und Einkochverlusten schwanken die Schaetzungen
+# spuerbar, und ein danebenliegender Wert landet ungeprueft in der Tagesbilanz.
+MODEL = "claude-opus-5"
+# "high" ist die Voreinstellung und der sinnvolle Punkt fuer diese Aufgabe;
+# "max" waere fuer eine Naehrwertschaetzung Verschwendung.
+EFFORT = "high"
 MAX_INPUT_CHARS = 500
 TIMEOUT = 45.0
 
@@ -115,7 +121,7 @@ def estimate(text):
             system=SYSTEM,
             thinking={"type": "adaptive"},
             output_config={
-                "effort": "medium",
+                "effort": EFFORT,
                 "format": {"type": "json_schema", "schema": SCHEMA},
             },
             messages=[{"role": "user", "content": text}],
