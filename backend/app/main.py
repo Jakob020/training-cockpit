@@ -2,6 +2,7 @@
 
 Serves:
 - /api/kv/{key}         key/value store the frontend uses instead of window.storage
+- /api/food/*           Lebensmittel-Tracking (Open Food Facts)
 - /api/yazio/sync       trigger a Yazio pull now
 - /api/yazio/status     last sync result
 - /                     the built frontend (static)
@@ -11,9 +12,10 @@ import os
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from . import db, yazio
+from . import db, food_api, yazio
 
 app = FastAPI(title="Training Cockpit")
+app.include_router(food_api.router)
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
 

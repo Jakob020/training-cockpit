@@ -96,6 +96,99 @@ async function flushPendingWrites() {
   }
   return listPendingKeys().length;
 }
+/* --------------------- Lebensmittel-Tracking (Open Food Facts) ----------
+   Die Suche braucht Netz, alles andere soll in der Halle auch offline
+   funktionieren. Deshalb werden Zuletzt/Favoriten/Eigene/Rezepte bei jedem
+   Oeffnen des Overlays in localStorage gespiegelt und von dort gelesen,
+   wenn der Server nicht erreichbar ist. */
+const FOOD_MIRROR_PREFIX = "cockpit_food_";
+const MEALS = [
+  { id: "fruehstueck", label: "Frühstück" },
+  { id: "mittag", label: "Mittag" },
+  { id: "abend", label: "Abend" },
+  { id: "snack", label: "Snack" },
+];
+const MEAL_LABEL = Object.fromEntries(MEALS.map((m) => [m.id, m.label]));
+
+function mirrorWrite(name, value) {
+  try { localStorage.setItem(FOOD_MIRROR_PREFIX + name, JSON.stringify(value)); } catch (e) {}
+}
+function mirrorRead(name) {
+  try {
+    const raw = localStorage.getItem(FOOD_MIRROR_PREFIX + name);
+    return raw != null ? JSON.parse(raw) : [];
+  } catch (e) { return []; }
+}
+
+async function foodGet(path) {
+  const r = await fetch(`/api/food${path}`);
+  if (!r.ok) throw new Error(`GET ${path} ${r.status}`);
+  return r.json();
+}
+async function foodSend(method, path, body) {
+  const r = await fetch(`/api/food${path}`, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`${method} ${path} ${r.status}`);
+  return r.json();
+}
+
+/* Naehrwerte einer Menge aus den Werten pro 100 g. Fehlende Werte bleiben
+   fehlend — ein geratener Nullwert waere schlimmer als eine Luecke. */
+const scaleMacro = (per100, key, grams) => {
+  const v = per100 && per100[key];
+  if (v === null || v === undefined) return null;
+  return (num(v) * num(grams)) / 100;
+};
+const kcalOf = (per100, grams) => {
+  const v = scaleMacro(per100, "kcal", grams);
+  return v === null ? null : Math.round(v);
+};
+/* Offline-Warteschlange fuer neue Eintraege. Die bestehende Queue in
+   loadKey/saveKey kann nur ganze KV-Blobs nachreichen und passt deshalb
+   nicht auf die Food-Routen. Bewusst nur fuer das Anlegen: genau das
+   passiert in der Halle ohne Netz. Aendern und Loeschen brauchen Verbindung,
+   weil dafuer die vom Server vergebene Eintrags-ID noetig ist. */
+const FOOD_QUEUE_KEY = "cockpit_food_pending";
+function foodQueueList() {
+  try { return JSON.parse(localStorage.getItem(FOOD_QUEUE_KEY) || "[]"); } catch (e) { return []; }
+}
+function foodQueueSet(list) {
+  try { localStorage.setItem(FOOD_QUEUE_KEY, JSON.stringify(list)); } catch (e) {}
+}
+function foodQueuePush(op) {
+  const list = foodQueueList();
+  list.push({ ...op, qid: newId() + newId(), at: new Date().toISOString() });
+  foodQueueSet(list);
+  return list;
+}
+async function foodQueueFlush() {
+  const list = foodQueueList();
+  if (!list.length) return { done: 0, remaining: 0, day: null };
+  const rest = [];
+  let done = 0, day = null;
+  for (const op of list) {
+    try {
+      const r = await foodSend(op.method, op.path, op.body);
+      day = r.day || day;
+      done++;
+    } catch (e) {
+      rest.push(op); // Weiter offline: fuer den naechsten Versuch behalten.
+    }
+  }
+  foodQueueSet(rest);
+  return { done, remaining: rest.length, day };
+}
+
+/* Wonach die lokalen Listen offline durchsucht werden. */
+const matchesQuery = (item, q) => {
+  if (!q) return true;
+  const hay = `${item.name || ""} ${item.brand || ""}`.toLowerCase();
+  return q.toLowerCase().split(/\s+/).filter(Boolean).every((t) => hay.includes(t));
+};
+
 /* ------------------------------ Datum-Helfer ---------------------------- */
 const WD = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
 const WD_LONG = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
@@ -566,6 +659,18 @@ export default function App() {
   const info = dayInfo(viewISO, settings.week1Start);
   const dayEntry = log[viewISO] || {};
   const updateLog = (dateISO, patch) => setLog((prev) => ({ ...prev, [dateISO]: { ...(prev[dateISO] || {}), ...patch } }));
+  /* Das Backend rechnet die Tagessummen aus dem food_log und schreibt sie in
+     denselben log-Key, den die Tagesansicht liest. Weil das Frontend log als
+     ein einziges Blob zurueckschreibt, muss der frische Serverstand sofort in
+     den State — sonst ueberbuegelt der naechste Schreibvorgang die Summen.
+     Lokale Eingaben (Gewicht, Notiz) bleiben erhalten; Makros, die der Server
+     nicht mehr liefert, werden gezielt entfernt. */
+  const FOOD_DAY_KEYS = ["kcal", "protein", "carbs", "fat", "nutrition_source"];
+  const applyFoodDay = (dateISO, dayObj) => setLog((prev) => {
+    const next = { ...(prev[dateISO] || {}), ...(dayObj || {}) };
+    FOOD_DAY_KEYS.forEach((k) => { if (!dayObj || !(k in dayObj)) delete next[k]; });
+    return { ...prev, [dateISO]: next };
+  });
 
   return (
     <div className="trn">
@@ -579,7 +684,8 @@ export default function App() {
 
           {tab === "today" && (
             <TodayView info={info} viewISO={viewISO} setViewISO={setViewISO} settings={settings}
-              plan={plan} nutrition={nutrition} strength={strength} entry={dayEntry} updateLog={updateLog} log={log} flash={flash} />
+              plan={plan} nutrition={nutrition} strength={strength} entry={dayEntry} updateLog={updateLog} log={log} flash={flash}
+              applyFoodDay={applyFoodDay} isOnline={isOnline} />
           )}
           {tab === "stats" && (
             <StatsView info={info} settings={settings} plan={plan} nutrition={nutrition} strength={strength} log={log} />
@@ -629,8 +735,9 @@ function Header({ info, settings }) {
 }
 
 /* ============================== HEUTE =================================== */
-function TodayView({ info, viewISO, setViewISO, settings, plan, nutrition, strength, entry, updateLog, log, flash }) {
+function TodayView({ info, viewISO, setViewISO, settings, plan, nutrition, strength, entry, updateLog, log, flash, applyFoodDay, isOnline }) {
   const [ovEdit, setOvEdit] = useState(false);
+  const [foodOpen, setFoodOpen] = useState(false);
   const planDay = info.inPlan ? plan.weeks[info.week - 1][info.wd] : null;
   const day = entry.override || planDay;
   const isToday = viewISO === toISO(new Date());
@@ -682,7 +789,12 @@ function TodayView({ info, viewISO, setViewISO, settings, plan, nutrition, stren
           onSave={saveOverride} onCancel={() => setOvEdit(false)} />
       )}
 
-      <NutritionCard day={day || { dayType: "rest" }} nutrition={nutrition} entry={entry} />
+      <NutritionCard day={day || { dayType: "rest" }} nutrition={nutrition} entry={entry} onTrack={() => setFoodOpen(true)} />
+
+      {foodOpen && (
+        <FoodOverlay dateISO={viewISO} onClose={() => setFoodOpen(false)}
+          applyFoodDay={applyFoodDay} flash={flash} isOnline={isOnline} />
+      )}
 
       <Card>
         <div className="trn-row-between">
@@ -987,7 +1099,7 @@ function StrengthCard({ day, week, strength, settings, viewISO, entry, updateLog
 /* Ernährungswerte sind bewusst schreibgeschützt: sie kommen ausschliesslich
    aus dem Yazio-Sync. Der manuelle Import unter Setup → Yazio bleibt als
    Notfall-Weg, falls der Sync mal falsche Werte liefert. */
-function NutritionCard({ day, nutrition, entry }) {
+function NutritionCard({ day, nutrition, entry, onTrack }) {
   const t = nutrition[day.dayType] || nutrition.rest;
   const rows = [
     { key: "kcal", label: "kcal", target: `${t.kcalMin}–${t.kcalMax}`, val: entry.kcal, mid: (t.kcalMin + t.kcalMax) / 2 },
@@ -998,7 +1110,10 @@ function NutritionCard({ day, nutrition, entry }) {
   const anyValue = rows.some((r) => numOrNull(r.val) != null);
   return (
     <Card>
-      <div className="trn-row-between"><Eyebrow>Ernährung · {t.label}</Eyebrow><span className="trn-mini-label">aus Yazio übertragen</span></div>
+      <div className="trn-row-between">
+        <Eyebrow>Ernährung · {t.label}</Eyebrow>
+        <span className="trn-mini-label">{entry.nutrition_source === "food_log" ? "selbst getrackt" : "aus Yazio übertragen"}</span>
+      </div>
       <div className="trn-nut-grid">
         {rows.map((r) => {
           const v = numOrNull(r.val);
@@ -1016,8 +1131,522 @@ function NutritionCard({ day, nutrition, entry }) {
           );
         })}
       </div>
-      {!anyValue && <div className="trn-hint" style={{ marginTop: 10 }}>Für diesen Tag liegen noch keine Yazio-Daten vor. Der Sync läuft alle 30 Minuten.</div>}
+      {!anyValue && <div className="trn-hint" style={{ marginTop: 10 }}>Für diesen Tag liegen noch keine Werte vor. Tracke dein Essen oder warte auf den Yazio-Sync.</div>}
+      <button className="trn-food-btn" onClick={onTrack}>Essen tracken</button>
     </Card>
+  );
+}
+
+/* ========================= ESSEN TRACKEN (Overlay) =======================
+   Das gesamte Tracking passiert hier drin. Die Tagesansicht bleibt dadurch
+   so schlank wie vorher: nach dem Schliessen stehen dort nur die vier
+   aggregierten Werte. Zucker, Ballaststoffe, gesaettigte Fettsaeuren und
+   Salz werden mitgespeichert, aber bewusst nirgends angezeigt. */
+function defaultMeal() {
+  const h = new Date().getHours();
+  if (h < 10) return "fruehstueck";
+  if (h < 15) return "mittag";
+  if (h < 21) return "abend";
+  return "snack";
+}
+
+function FoodOverlay({ dateISO, onClose, applyFoodDay, flash, isOnline }) {
+  const [tab, setTab] = useState("recent"); // haeufigster Fall zuerst
+  const [q, setQ] = useState("");
+  const [barcode, setBarcode] = useState("");
+  const [results, setResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [searchOffline, setSearchOffline] = useState(false);
+  // Spiegel aus localStorage als Startwert: sofort da, auch ohne Netz.
+  const [recent, setRecent] = useState(() => mirrorRead("recent"));
+  const [favorites, setFavorites] = useState(() => mirrorRead("favorites"));
+  const [custom, setCustom] = useState(() => mirrorRead("custom"));
+  const [recipes, setRecipes] = useState(() => mirrorRead("recipes"));
+  const [day, setDay] = useState({ entries: [], by_meal: {}, totals: {} });
+  const [queued, setQueued] = useState(() => foodQueueList());
+  const [pick, setPick] = useState(null);
+  const [recipeDraft, setRecipeDraft] = useState(null);
+  const [customDraft, setCustomDraft] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const favKeys = new Set(favorites.map((f) => f.key));
+
+  const reloadDay = async () => {
+    try {
+      const d = await foodGet(`/log?date=${dateISO}`);
+      setDay(d);
+      applyFoodDay(dateISO, d.day);
+      return d;
+    } catch (e) { return null; }
+  };
+  const reloadLists = async () => {
+    const grab = async (path, name, setter) => {
+      try {
+        const r = await foodGet(path);
+        const items = r.items || [];
+        setter(items); mirrorWrite(name, items);
+      } catch (e) { /* offline: Spiegel behalten */ }
+    };
+    await Promise.all([
+      grab("/recent", "recent", setRecent),
+      grab("/favorites", "favorites", setFavorites),
+      grab("/custom", "custom", setCustom),
+      grab("/recipes", "recipes", setRecipes),
+    ]);
+  };
+
+  // Beim Oeffnen: Warteschlange leeren, dann alles frisch holen.
+  useEffect(() => {
+    (async () => {
+      const res = await foodQueueFlush();
+      setQueued(foodQueueList());
+      if (res.done) flash(`${res.done} nachgetragen`);
+      await reloadDay();
+      await reloadLists();
+    })();
+  }, []);
+
+  // Zurueck im Netz: liegengebliebene Eintraege nachreichen.
+  useEffect(() => {
+    if (!isOnline || !queued.length) return;
+    (async () => {
+      const res = await foodQueueFlush();
+      setQueued(foodQueueList());
+      if (res.done) { flash(`${res.done} nachgetragen`); await reloadDay(); await reloadLists(); }
+    })();
+  }, [isOnline]);
+
+  // Offline gehoert die Volltextsuche nicht bedient — dann auf "Zuletzt".
+  useEffect(() => { if (!isOnline && tab === "search") setTab("recent"); }, [isOnline, tab]);
+
+  /* 300 ms Debounce: ohne das ginge pro Tastenanschlag eine Anfrage an OFF. */
+  useEffect(() => {
+    if (tab !== "search") return undefined;
+    const term = q.trim();
+    if (term.length < 2) { setResults([]); setSearching(false); return undefined; }
+    setSearching(true);
+    const t = setTimeout(async () => {
+      try {
+        const r = await foodGet(`/search?q=${encodeURIComponent(term)}`);
+        setResults(r.items || []);
+        setSearchOffline(!!r.offline);
+      } catch (e) { setResults([]); setSearchOffline(true); }
+      setSearching(false);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [q, tab]);
+
+  const openPick = (it, source, ref, preset) => setPick({
+    source, ref: ref || "", name: it.name, brand: it.brand || "",
+    per100: it.per100 || {},
+    serving: numOrNull(it.serving_quantity),
+    amount: de(String(preset != null ? preset : (numOrNull(it.serving_quantity) || 100))),
+    meal: defaultMeal(),
+    forRecipe: !!recipeDraft,
+  });
+
+  const lookupBarcode = async () => {
+    const code = (barcode || "").replace(/\D+/g, "");
+    if (!code) return;
+    try {
+      const r = await foodGet(`/barcode/${code}`);
+      if (r.item) { openPick(r.item, "off", r.item.code); setBarcode(""); }
+      else flash("Produkt nicht gefunden");
+    } catch (e) { flash(isOnline ? "Produkt nicht gefunden" : "Barcode braucht Netz"); }
+  };
+
+  const confirmPick = async () => {
+    const grams = num(pick.amount);
+    if (!(grams > 0)) { flash("Menge fehlt"); return; }
+    // Im Rezept-Modus wandert die Auswahl in den Entwurf statt in den Tag.
+    if (pick.forRecipe && recipeDraft) {
+      setRecipeDraft({ ...recipeDraft, zutaten: [...recipeDraft.zutaten,
+        { source: pick.source, ref: pick.ref, name: pick.name, amount_g: grams, per100: pick.per100 }] });
+      setPick(null);
+      return;
+    }
+    const body = { date: dateISO, source: pick.source, ref: pick.ref, name: pick.name,
+      brand: pick.brand, meal: pick.meal, amount_g: grams, per100: pick.per100 };
+    setBusy(true);
+    try {
+      const r = await foodSend("POST", "/log", body);
+      applyFoodDay(dateISO, r.day);
+      await reloadDay(); await reloadLists();
+      flash(`${pick.name} hinzugefügt`);
+    } catch (e) {
+      foodQueuePush({ method: "POST", path: "/log", body });
+      setQueued(foodQueueList());
+      flash("Offline gemerkt — wird nachgetragen");
+    }
+    setBusy(false);
+    setPick(null);
+  };
+
+  const changeAmount = async (entry, value) => {
+    const grams = num(value);
+    if (!(grams > 0)) return;
+    try {
+      const r = await foodSend("PATCH", `/log/${entry.id}`, { date: dateISO, amount_g: grams });
+      applyFoodDay(dateISO, r.day);
+      await reloadDay();
+    } catch (e) { flash("Ändern braucht Netz"); }
+  };
+  const removeEntry = async (entry) => {
+    try {
+      const r = await foodSend("DELETE", `/log/${entry.id}?date=${dateISO}`);
+      applyFoodDay(dateISO, r.day);
+      await reloadDay(); 
+      flash("Gelöscht");
+    } catch (e) { flash("Löschen braucht Netz"); }
+  };
+  const toggleFavorite = async (it, key) => {
+    try {
+      if (favKeys.has(key)) {
+        const r = await foodSend("DELETE", `/favorites/${encodeURIComponent(key)}`);
+        setFavorites(r.items); mirrorWrite("favorites", r.items);
+      } else {
+        const r = await foodSend("POST", "/favorites", { source: it.source || "off", ref: it.ref || it.code,
+          name: it.name, brand: it.brand, per100: it.per100, amount_g: it.last_amount_g });
+        setFavorites(r.items); mirrorWrite("favorites", r.items);
+      }
+    } catch (e) { flash("Favoriten brauchen Netz"); }
+  };
+
+  const bookRecipe = async (recipe, portionen) => {
+    const body = { date: dateISO, recipe_id: recipe.id, portionen, meal: defaultMeal() };
+    try {
+      const r = await foodSend("POST", "/log/recipe", body);
+      applyFoodDay(dateISO, r.day);
+      await reloadDay(); await reloadLists();
+      flash(`${recipe.name} gebucht`);
+    } catch (e) {
+      foodQueuePush({ method: "POST", path: "/log/recipe", body });
+      setQueued(foodQueueList());
+      flash("Offline gemerkt — wird nachgetragen");
+    }
+  };
+
+  const totals = day.totals || {};
+  const localList = tab === "recent"
+    ? [...favorites.map((f) => ({ ...f, _fav: true })), ...recent.filter((r) => !favKeys.has(r.key))]
+    : [];
+
+  return (
+    <div className="trn-food">
+      <div className="trn-food-head">
+        <div className="trn-row-between">
+          <div>
+            <div className="trn-food-title">Essen tracken</div>
+            <div className="trn-mini-label">{fmtDate(dateISO)}</div>
+          </div>
+          <Btn small onClick={onClose}>Schließen</Btn>
+        </div>
+        <div className="trn-food-inputs">
+          <input className="trn-input" placeholder="Lebensmittel suchen…" value={q}
+            onChange={(e) => { setQ(e.target.value); if (e.target.value.trim().length >= 2 && isOnline) setTab("search"); }} />
+          <div className="trn-food-barcode">
+            <input className="trn-input" inputMode="numeric" placeholder="Barcode" value={barcode}
+              onChange={(e) => setBarcode(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && lookupBarcode()} />
+            <Btn small onClick={lookupBarcode}>OK</Btn>
+          </div>
+        </div>
+        <div className="trn-food-tabs">
+          {[{ id: "recent", label: "Zuletzt" }, { id: "search", label: "Suche" },
+            { id: "recipes", label: "Rezepte" }, { id: "custom", label: "Eigene" }].map((t) => (
+            <button key={t.id} className={`trn-food-tab ${tab === t.id ? "active" : ""}`}
+              onClick={() => setTab(t.id)}>{t.label}</button>
+          ))}
+        </div>
+        {!isOnline && <div className="trn-food-offline">Offline — Suche bei Open Food Facts nicht möglich. Zuletzt genutzte, Favoriten, eigene Lebensmittel und Rezepte funktionieren weiter.</div>}
+        {queued.length > 0 && <div className="trn-food-offline">{queued.length} Eintrag{queued.length === 1 ? "" : "e"} wartet auf Verbindung.</div>}
+      </div>
+
+      <div className="trn-food-body">
+        {tab === "recent" && (
+          <FoodList items={localList.filter((i) => matchesQuery(i, q))}
+            empty="Noch nichts getrackt. Such oben nach einem Lebensmittel."
+            onPick={(i) => openPick(i, i.source || "off", i.ref, i.last_amount_g)}
+            onFav={(i) => toggleFavorite(i, i.key)} favKeys={favKeys} />
+        )}
+        {tab === "search" && (
+          <>
+            {searching && <div className="trn-food-note">Suche läuft…</div>}
+            {!searching && searchOffline && <div className="trn-food-note">Open Food Facts ist gerade nicht erreichbar.</div>}
+            {!searching && !searchOffline && q.trim().length < 2 && <div className="trn-food-note">Mindestens zwei Zeichen eingeben.</div>}
+            {!searching && !searchOffline && q.trim().length >= 2 && results.length === 0 && <div className="trn-food-note">Keine Treffer.</div>}
+            <FoodList items={results.map((r) => ({ ...r, ref: r.code, source: "off", key: `off:${r.code}` }))}
+              onPick={(i) => openPick(i, "off", i.code)}
+              onFav={(i) => toggleFavorite(i, `off:${i.code}`)} favKeys={favKeys} />
+          </>
+        )}
+        {tab === "recipes" && (
+          <RecipeTab recipes={recipes} draft={recipeDraft} setDraft={setRecipeDraft}
+            onBook={bookRecipe} setTab={setTab} flash={flash}
+            onSaved={async () => { await reloadLists(); setRecipeDraft(null); }} />
+        )}
+        {tab === "custom" && (
+          <CustomTab items={custom.filter((i) => matchesQuery(i, q))} draft={customDraft} setDraft={setCustomDraft}
+            onPick={(i) => openPick(i, "custom", i.id)} flash={flash}
+            onSaved={async () => { await reloadLists(); setCustomDraft(null); }} />
+        )}
+
+        {/* Heute getrackt, nach Mahlzeit gruppiert */}
+        <div className="trn-food-today">
+          <Eyebrow>An diesem Tag</Eyebrow>
+          {(day.entries || []).length === 0 && <div className="trn-food-note">Noch keine Einträge.</div>}
+          {MEALS.map((m) => {
+            const items = (day.by_meal || {})[m.id] || [];
+            if (!items.length) return null;
+            return (
+              <div className="trn-food-meal" key={m.id}>
+                <div className="trn-food-meal-h">{m.label}</div>
+                {items.map((e) => (
+                  <div className="trn-food-entry" key={e.id}>
+                    <div className="trn-food-entry-main">
+                      <span className="trn-food-entry-name">{e.name}</span>
+                      <span className="trn-food-entry-sub">
+                        {e.brand ? `${e.brand} · ` : ""}{kcalOf(e.per100, e.amount_g) ?? "—"} kcal
+                      </span>
+                    </div>
+                    <input className="trn-input trn-input-num" inputMode="decimal" defaultValue={de(e.amount_g)}
+                      onBlur={(ev) => changeAmount(e, ev.target.value)} />
+                    <span className="trn-suffix">g</span>
+                    <button className="trn-del" onClick={() => removeEntry(e)}>✕</button>
+                  </div>
+                ))}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="trn-food-foot">
+        <div className="trn-food-sums">
+          {[["kcal", "kcal", ""], ["protein", "P", "g"], ["carbs", "C", "g"], ["fat", "F", "g"]].map(([k, lab, suf]) => (
+            <div className="trn-food-sum" key={k}>
+              <span className="trn-food-sum-val">{totals[k] != null ? de(totals[k]) : "0"}</span>
+              <span className="trn-food-sum-lab">{lab}{suf ? ` (${suf})` : ""}</span>
+            </div>
+          ))}
+        </div>
+        <Btn variant="primary" onClick={onClose}>Fertig</Btn>
+      </div>
+
+      {pick && (
+        <FoodPicker pick={pick} setPick={setPick} onConfirm={confirmPick} busy={busy}
+          forRecipe={pick.forRecipe} />
+      )}
+    </div>
+  );
+}
+
+/* Eine Trefferliste — gleich fuer Suche, Zuletzt und Eigene. */
+function FoodList({ items, onPick, onFav, favKeys, empty }) {
+  if (!items.length) return empty ? <div className="trn-food-note">{empty}</div> : null;
+  return (
+    <div className="trn-food-list">
+      {items.map((it, i) => {
+        const key = it.key || `${it.source || "off"}:${it.ref || it.code || i}`;
+        const kcal = it.per100 && it.per100.kcal != null ? Math.round(it.per100.kcal) : null;
+        return (
+          <div className="trn-food-row" key={key}>
+            <button className="trn-food-row-main" onClick={() => onPick(it)}>
+              <span className="trn-food-row-name">{it.name}</span>
+              <span className="trn-food-row-sub">
+                {it.brand ? `${it.brand} · ` : ""}{kcal != null ? `${kcal} kcal/100 g` : "keine Nährwerte"}
+                {it.last_amount_g ? ` · zuletzt ${de(it.last_amount_g)} g` : ""}
+              </span>
+            </button>
+            {onFav && (
+              <button className={`trn-food-fav ${favKeys && favKeys.has(key) ? "on" : ""}`}
+                onClick={() => onFav(it)} title="Favorit">★</button>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* Mengen- und Mahlzeitenauswahl. */
+function FoodPicker({ pick, setPick, onConfirm, busy, forRecipe }) {
+  const grams = num(pick.amount);
+  const kcal = kcalOf(pick.per100, grams);
+  const quick = [pick.serving, 50, 100, 150, 200].filter((v, i, a) => v && a.indexOf(v) === i).slice(0, 4);
+  return (
+    <div className="trn-food-sheet">
+      <div className="trn-food-sheet-inner">
+        <div className="trn-food-sheet-name">{pick.name}</div>
+        {pick.brand && <div className="trn-mini-label">{pick.brand}</div>}
+        <div className="trn-food-amount">
+          <input className="trn-input" inputMode="decimal" value={pick.amount}
+            onChange={(e) => setPick({ ...pick, amount: e.target.value })} />
+          <span className="trn-suffix">g</span>
+          <span className="trn-food-kcal">{kcal != null ? `${de(kcal)} kcal` : "keine Nährwerte"}</span>
+        </div>
+        <div className="trn-food-quick">
+          {quick.map((v) => (
+            <button key={v} className="trn-food-quick-btn" onClick={() => setPick({ ...pick, amount: de(String(v)) })}>
+              {de(v)} g{pick.serving === v ? " · Portion" : ""}
+            </button>
+          ))}
+        </div>
+        {!forRecipe && (
+          <>
+            <div className="trn-mini-label" style={{ margin: "12px 0 6px" }}>Mahlzeit</div>
+            <div className="trn-food-meals">
+              {MEALS.map((m) => (
+                <button key={m.id} className={`trn-food-meal-btn ${pick.meal === m.id ? "active" : ""}`}
+                  onClick={() => setPick({ ...pick, meal: m.id })}>{m.label}</button>
+              ))}
+            </div>
+          </>
+        )}
+        <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+          <Btn variant="primary" onClick={onConfirm} disabled={busy}>
+            {forRecipe ? "Als Zutat übernehmen" : "Hinzufügen"}
+          </Btn>
+          <Btn onClick={() => setPick(null)}>Abbrechen</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* Rezepte: anlegen, bearbeiten, mit Portionsanzahl buchen. */
+function RecipeTab({ recipes, draft, setDraft, onBook, onSaved, setTab, flash }) {
+  const [portions, setPortions] = useState({});
+  const save = async () => {
+    if (!draft.zutaten.length) { flash("Mindestens eine Zutat"); return; }
+    try {
+      const body = { name: draft.name, portionen: num(draft.portionen) || 1, zutaten: draft.zutaten };
+      if (draft.id) await foodSend("PUT", `/recipes/${draft.id}`, body);
+      else await foodSend("POST", "/recipes", body);
+      flash("Rezept gespeichert");
+      onSaved();
+    } catch (e) { flash("Rezepte brauchen Netz"); }
+  };
+  const del = async (id) => {
+    try { await foodSend("DELETE", `/recipes/${id}`); flash("Rezept gelöscht"); onSaved(); }
+    catch (e) { flash("Rezepte brauchen Netz"); }
+  };
+
+  if (draft) {
+    const total = draft.zutaten.reduce((s, z) => s + (kcalOf(z.per100, z.amount_g) || 0), 0);
+    const p = num(draft.portionen) || 1;
+    return (
+      <div className="trn-food-draft">
+        <Field label="Name" value={draft.name} onChange={(v) => setDraft({ ...draft, name: v })} />
+        <Field label="Portionen" type="number" value={draft.portionen} onChange={(v) => setDraft({ ...draft, portionen: v })} />
+        <div className="trn-mini-label" style={{ margin: "12px 0 6px" }}>Zutaten</div>
+        {draft.zutaten.length === 0 && <div className="trn-food-note">Noch keine Zutat. Über „Suche“, „Zuletzt“ oder „Eigene“ auswählen — die Auswahl landet dann hier.</div>}
+        {draft.zutaten.map((z, i) => (
+          <div className="trn-food-entry" key={i}>
+            <div className="trn-food-entry-main">
+              <span className="trn-food-entry-name">{z.name}</span>
+              <span className="trn-food-entry-sub">{de(z.amount_g)} g · {kcalOf(z.per100, z.amount_g) ?? "—"} kcal</span>
+            </div>
+            <button className="trn-del" onClick={() => setDraft({ ...draft, zutaten: draft.zutaten.filter((_, j) => j !== i) })}>✕</button>
+          </div>
+        ))}
+        <div className="trn-food-note" style={{ marginTop: 10 }}>
+          Gesamt {de(Math.round(total))} kcal · je Portion {de(Math.round(total / p))} kcal
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+          <Btn small onClick={() => setTab("search")}>+ Zutat suchen</Btn>
+          <Btn small variant="primary" onClick={save}>Speichern</Btn>
+          <Btn small onClick={() => setDraft(null)}>Abbrechen</Btn>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <Btn small variant="primary" onClick={() => setDraft({ name: "", portionen: "2", zutaten: [] })}>+ Neues Rezept</Btn>
+      {recipes.length === 0 && <div className="trn-food-note">Noch keine Rezepte.</div>}
+      <div className="trn-food-list">
+        {recipes.map((r) => {
+          const info = r.info || {};
+          const perP = (info.per_portion || {}).kcal;
+          const n = portions[r.id] ?? "1";
+          return (
+            <div className="trn-food-recipe" key={r.id}>
+              <div className="trn-food-row-main" style={{ cursor: "default" }}>
+                <span className="trn-food-row-name">{r.name}</span>
+                <span className="trn-food-row-sub">
+                  {r.zutaten.length} Zutaten · {de(info.portionen || 1)} Portionen · {perP != null ? `${de(Math.round(perP))} kcal/Portion` : "—"}
+                </span>
+              </div>
+              <div className="trn-food-recipe-act">
+                <input className="trn-input trn-input-num" inputMode="decimal" value={n}
+                  onChange={(e) => setPortions({ ...portions, [r.id]: e.target.value })} />
+                <span className="trn-suffix">Prt.</span>
+                <Btn small variant="primary" onClick={() => onBook(r, num(n) || 1)}>Buchen</Btn>
+                <Btn small onClick={() => setDraft({ id: r.id, name: r.name, portionen: String(r.portionen), zutaten: r.zutaten })}>Bearb.</Btn>
+                <button className="trn-del" onClick={() => del(r.id)}>✕</button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* Eigene Lebensmittel: Name + Naehrwerte pro 100 g. */
+function CustomTab({ items, draft, setDraft, onPick, onSaved, flash }) {
+  const save = async () => {
+    if (!draft.name.trim()) { flash("Name fehlt"); return; }
+    try {
+      await foodSend("POST", "/custom", {
+        name: draft.name, brand: draft.brand,
+        per100: { kcal: numOrNull(draft.kcal), protein: numOrNull(draft.protein),
+          carbs: numOrNull(draft.carbs), fat: numOrNull(draft.fat) },
+      });
+      flash("Gespeichert"); onSaved();
+    } catch (e) { flash("Speichern braucht Netz"); }
+  };
+  const del = async (id) => {
+    try { await foodSend("DELETE", `/custom/${id}`); onSaved(); }
+    catch (e) { flash("Löschen braucht Netz"); }
+  };
+  if (draft) {
+    return (
+      <div className="trn-food-draft">
+        <Field label="Name" value={draft.name} onChange={(v) => setDraft({ ...draft, name: v })} />
+        <Field label="Marke (optional)" value={draft.brand} onChange={(v) => setDraft({ ...draft, brand: v })} />
+        <div className="trn-mini-label" style={{ margin: "12px 0 6px" }}>Nährwerte pro 100 g</div>
+        <div className="trn-edit-grid" style={{ marginTop: 0 }}>
+          <Field label="kcal" type="number" value={draft.kcal} onChange={(v) => setDraft({ ...draft, kcal: v })} />
+          <Field label="Protein" type="number" suffix="g" value={draft.protein} onChange={(v) => setDraft({ ...draft, protein: v })} />
+          <Field label="Carbs" type="number" suffix="g" value={draft.carbs} onChange={(v) => setDraft({ ...draft, carbs: v })} />
+          <Field label="Fett" type="number" suffix="g" value={draft.fat} onChange={(v) => setDraft({ ...draft, fat: v })} />
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+          <Btn small variant="primary" onClick={save}>Speichern</Btn>
+          <Btn small onClick={() => setDraft(null)}>Abbrechen</Btn>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <Btn small variant="primary" onClick={() => setDraft({ name: "", brand: "", kcal: "", protein: "", carbs: "", fat: "" })}>+ Eigenes Lebensmittel</Btn>
+      {items.length === 0 && <div className="trn-food-note">Noch keine eigenen Lebensmittel.</div>}
+      <div className="trn-food-list">
+        {items.map((it) => (
+          <div className="trn-food-row" key={it.id}>
+            <button className="trn-food-row-main" onClick={() => onPick(it)}>
+              <span className="trn-food-row-name">{it.name}</span>
+              <span className="trn-food-row-sub">{it.per100.kcal != null ? `${de(Math.round(it.per100.kcal))} kcal/100 g` : "keine Nährwerte"}</span>
+            </button>
+            <button className="trn-del" onClick={() => del(it.id)}>✕</button>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -1698,6 +2327,13 @@ function SetupView({ settings, setSettings, plan, strength, log, setPlan, setNut
         )}
       </Card>
 
+      <Card>
+        <Eyebrow>Datenquellen</Eyebrow>
+        <div className="trn-hint" style={{ marginTop: 6 }}>
+          Lebensmitteldaten von <a className="trn-link" href="https://openfoodfacts.org" target="_blank" rel="noreferrer">Open Food Facts</a> (ODbL).
+        </div>
+      </Card>
+
       <div className="trn-footer">12-Wochen-Block · Sweet Spot → Schwelle → VO2max · Deload W4/W8 · Taper W12</div>
     </div>
   );
@@ -1927,6 +2563,67 @@ function Style() {
     .trn-help{margin-top:8px;display:flex;flex-direction:column;gap:9px;}
     .trn-help p{font-size:12.5px;color:var(--dim);line-height:1.55;margin:0;}
     .trn-help b{color:var(--txt);}
+
+    /* --- Essen tracken: Button in der Ernaehrungskarte + Vollbild-Overlay --- */
+    .trn-food-btn{width:100%;margin-top:14px;background:var(--surface2);border:1px solid var(--border2);color:var(--txt);border-radius:10px;padding:11px;font-size:13.5px;font-weight:600;cursor:pointer;font-family:var(--sans);}
+    .trn-food-btn:active{background:var(--raised);}
+    .trn-link{color:var(--accent);text-decoration:none;}
+
+    .trn-food{position:fixed;inset:0;z-index:60;background:var(--bg);display:flex;flex-direction:column;max-width:520px;margin:0 auto;}
+    .trn-food-head{padding:12px 14px 0;border-bottom:1px solid var(--border);background:var(--surface);}
+    .trn-food-title{font-size:17px;font-weight:700;}
+    .trn-food-inputs{display:flex;gap:8px;margin-top:12px;}
+    .trn-food-inputs>.trn-input{flex:1;}
+    .trn-food-barcode{display:flex;gap:5px;align-items:center;flex:none;width:150px;}
+    .trn-food-barcode .trn-input{width:96px;font-family:var(--mono);font-size:13px;padding:9px 8px;}
+    .trn-food-tabs{display:flex;gap:4px;margin-top:12px;}
+    .trn-food-tab{flex:1;background:none;border:none;border-bottom:2px solid transparent;color:var(--dim);font-size:12.5px;font-weight:600;padding:9px 2px;cursor:pointer;font-family:var(--sans);}
+    .trn-food-tab.active{color:var(--accent);border-bottom-color:var(--accent);}
+    .trn-food-offline{margin:10px 0;background:rgba(229,177,67,0.10);border:1px solid rgba(229,177,67,0.35);color:#e8d3a0;font-size:11.5px;padding:8px 11px;border-radius:9px;line-height:1.45;}
+
+    .trn-food-body{flex:1;overflow-y:auto;padding:12px 14px 16px;-webkit-overflow-scrolling:touch;}
+    .trn-food-note{font-size:12px;color:var(--faint);padding:12px 2px;line-height:1.5;}
+    .trn-food-list{display:flex;flex-direction:column;margin-top:6px;}
+    .trn-food-row{display:flex;align-items:center;gap:8px;border-top:1px solid var(--border);}
+    .trn-food-row:first-child{border-top:none;}
+    .trn-food-row-main{flex:1;display:flex;flex-direction:column;gap:2px;background:none;border:none;color:var(--txt);text-align:left;padding:11px 0;cursor:pointer;font-family:var(--sans);min-width:0;}
+    .trn-food-row-name{font-size:13.5px;font-weight:600;line-height:1.3;}
+    .trn-food-row-sub{font-size:11px;color:var(--faint);line-height:1.35;}
+    .trn-food-fav{background:none;border:none;color:var(--border2);font-size:17px;cursor:pointer;padding:4px 2px;flex:none;}
+    .trn-food-fav.on{color:var(--amber);}
+
+    .trn-food-today{margin-top:20px;padding-top:14px;border-top:1px solid var(--border);}
+    .trn-food-meal{margin-top:12px;}
+    .trn-food-meal-h{font-size:11px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.8px;margin-bottom:4px;}
+    .trn-food-entry{display:flex;align-items:center;gap:7px;padding:8px 0;border-top:1px solid var(--border);}
+    .trn-food-entry-main{flex:1;display:flex;flex-direction:column;gap:1px;min-width:0;}
+    .trn-food-entry-name{font-size:13px;line-height:1.3;}
+    .trn-food-entry-sub{font-size:10.5px;color:var(--faint);}
+    .trn-food-entry .trn-input-num{width:62px;}
+
+    .trn-food-foot{display:flex;align-items:center;gap:10px;padding:10px 14px max(10px,env(safe-area-inset-bottom));border-top:1px solid var(--border);background:var(--surface);}
+    .trn-food-sums{flex:1;display:grid;grid-template-columns:repeat(4,1fr);gap:6px;}
+    .trn-food-sum{text-align:center;}
+    .trn-food-sum-val{display:block;font-family:var(--mono);font-size:15px;font-weight:700;line-height:1.1;}
+    .trn-food-sum-lab{display:block;font-size:9px;color:var(--faint);text-transform:uppercase;letter-spacing:.4px;margin-top:1px;}
+
+    .trn-food-sheet{position:fixed;inset:0;z-index:70;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center;}
+    .trn-food-sheet-inner{width:100%;max-width:520px;background:var(--surface);border-top:1px solid var(--border2);border-radius:16px 16px 0 0;padding:16px 14px max(16px,env(safe-area-inset-bottom));}
+    .trn-food-sheet-name{font-size:16px;font-weight:700;line-height:1.3;}
+    .trn-food-amount{display:flex;align-items:center;gap:7px;margin-top:12px;}
+    .trn-food-amount .trn-input{width:84px;text-align:right;font-family:var(--mono);}
+    .trn-food-kcal{margin-left:auto;font-family:var(--mono);font-size:14px;font-weight:700;color:var(--accent);}
+    .trn-food-quick{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;}
+    .trn-food-quick-btn{background:var(--surface2);border:1px solid var(--border2);color:var(--dim);border-radius:8px;padding:7px 10px;font-size:11.5px;cursor:pointer;font-family:var(--sans);}
+    .trn-food-meals{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;}
+    .trn-food-meal-btn{background:var(--surface2);border:1px solid var(--border2);color:var(--dim);border-radius:8px;padding:9px 2px;font-size:11.5px;cursor:pointer;font-family:var(--sans);}
+    .trn-food-meal-btn.active{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;}
+
+    .trn-food-draft{margin-top:12px;display:flex;flex-direction:column;gap:10px;}
+    .trn-food-recipe{border-top:1px solid var(--border);padding:10px 0;}
+    .trn-food-recipe:first-child{border-top:none;}
+    .trn-food-recipe-act{display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap;}
+    .trn-food-recipe-act .trn-input-num{width:52px;}
 
     .trn-footer{text-align:center;font-size:10.5px;color:var(--faint);font-family:var(--mono);letter-spacing:.3px;line-height:1.5;padding:10px 0;}
 

@@ -213,12 +213,20 @@ def sync():
 
     log = db.kv_get("log") or {}
     updated = 0
+    skipped = 0
     for iso, day in _iter_days(days_json):
         macros = _macros_for_day(day)
         if not macros:
             continue
         entry = dict(log.get(iso) or {})
+        # Eigenes Lebensmittel-Tracking gewinnt immer: Tage mit food_log-
+        # Eintraegen darf der Sync nicht ueberschreiben, sonst waeren von Hand
+        # erfasste Mahlzeiten beim naechsten Lauf weg.
+        if entry.get("nutrition_source") == "food_log":
+            skipped += 1
+            continue
         entry.update(macros)
+        entry["nutrition_source"] = "yazio"
         log[iso] = entry
         updated += 1
     db.kv_set("log", log)
@@ -227,6 +235,7 @@ def sync():
         {
             "lastSync": datetime.datetime.now().isoformat(timespec="seconds"),
             "updated": updated,
+            "skipped": skipped,
             "ok": True,
         },
     )
