@@ -2385,13 +2385,14 @@ function Style() {
       --sans: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
       font-family: var(--sans); color: var(--txt); background: var(--bg);
       -webkit-font-smoothing: antialiased; min-height:100vh;
+      touch-action: manipulation; -webkit-text-size-adjust: 100%;
     }
     .trn *{box-sizing:border-box;}
     .trn-shell{max-width:520px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column;position:relative;background:var(--bg);}
     .trn-content{flex:1;padding:14px 14px 92px;}
     .trn-stack{display:flex;flex-direction:column;gap:12px;}
 
-    .trn-header{position:sticky;top:0;z-index:20;display:flex;justify-content:space-between;align-items:center;padding:14px 16px;background:rgba(15,19,26,0.92);backdrop-filter:blur(10px);border-bottom:1px solid var(--border);}
+    .trn-header{position:sticky;top:0;z-index:20;display:flex;justify-content:space-between;align-items:center;padding:calc(14px + env(safe-area-inset-top)) 16px 14px;background:rgba(15,19,26,0.92);backdrop-filter:blur(10px);border-bottom:1px solid var(--border);}
     .trn-brand{font-family:var(--mono);font-weight:700;letter-spacing:4px;font-size:15px;}
     .trn-header-sub{font-size:11px;color:var(--dim);margin-top:2px;font-family:var(--mono);letter-spacing:.3px;}
     .trn-header-week{text-align:right;display:flex;flex-direction:column;align-items:flex-end;}
@@ -2601,7 +2602,7 @@ function Style() {
     .trn-link{color:var(--accent);text-decoration:none;}
 
     .trn-food{position:fixed;inset:0;z-index:60;background:var(--bg);display:flex;flex-direction:column;max-width:520px;margin:0 auto;}
-    .trn-food-head{padding:12px 14px 0;border-bottom:1px solid var(--border);background:var(--surface);}
+    .trn-food-head{padding:calc(12px + env(safe-area-inset-top)) 14px 0;border-bottom:1px solid var(--border);background:var(--surface);}
     .trn-food-title{font-size:17px;font-weight:700;}
     .trn-food-inputs{display:flex;gap:8px;margin-top:12px;}
     .trn-food-inputs>.trn-input{flex:1;}
