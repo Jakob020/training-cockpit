@@ -11,7 +11,7 @@ import datetime
 
 from fastapi import APIRouter, HTTPException, Request
 
-from . import food, food_store
+from . import food, food_ai, food_store
 
 router = APIRouter(prefix="/api/food", tags=["food"])
 
@@ -36,6 +36,20 @@ def barcode(code: str):
     if res["item"] is None and not res["offline"]:
         raise HTTPException(status_code=404, detail="Produkt nicht gefunden")
     return res
+
+
+# ----------------------- KI-Schaetzung (selbstgemacht) -----------------------
+@router.get("/ai-status")
+def ai_status():
+    """Die Oberflaeche blendet die Funktion aus, wenn kein Schluessel liegt —
+    besser als ein Knopf, der nur Fehler produziert."""
+    return {"available": food_ai.available()}
+
+
+@router.post("/ai-estimate")
+async def ai_estimate(request: Request):
+    body = await request.json()
+    return food_ai.estimate(body.get("text"))
 
 
 # ------------------------------- Tageslog ------------------------------------

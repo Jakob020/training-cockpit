@@ -1165,6 +1165,7 @@ function FoodOverlay({ dateISO, onClose, applyFoodDay, flash, isOnline }) {
   const [pick, setPick] = useState(null);
   const [recipeDraft, setRecipeDraft] = useState(null);
   const [customDraft, setCustomDraft] = useState(null);
+  const [aiOn, setAiOn] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const favKeys = new Set(favorites.map((f) => f.key));
@@ -1201,6 +1202,8 @@ function FoodOverlay({ dateISO, onClose, applyFoodDay, flash, isOnline }) {
       if (res.done) flash(`${res.done} nachgetragen`);
       await reloadDay();
       await reloadLists();
+      // Ohne Schluessel bleibt die Schaetzfunktion unsichtbar.
+      try { setAiOn(!!(await foodGet("/ai-status")).available); } catch (e) { setAiOn(false); }
     })();
   }, []);
 
@@ -1387,6 +1390,26 @@ function FoodOverlay({ dateISO, onClose, applyFoodDay, flash, isOnline }) {
         )}
         {tab === "search" && (
           <>
+            {/* Eigene Eintraege zuerst: sie sind kuratiert und meist gemeint,
+                wenn man danach sucht. Ausserdem funktionieren sie offline. */}
+            {(() => {
+              const mine = [
+                ...custom.map((c) => ({ ...c, ref: c.id, source: "custom", key: `custom:${c.id}` })),
+                ...recipes.map((r) => ({
+                  name: r.name, brand: "Rezept", source: "recipe", ref: r.id, key: `recipe:${r.id}`,
+                  per100: (r.info || {}).per100 || {}, _recipe: r,
+                })),
+              ].filter((i) => matchesQuery(i, q));
+              if (!mine.length) return null;
+              return (
+                <>
+                  <div className="trn-food-sect">Eigene</div>
+                  <FoodList items={mine}
+                    onPick={(i) => (i._recipe ? openRecipePick(i._recipe) : openPick(i, "custom", i.ref))} />
+                  <div className="trn-food-sect">Open Food Facts</div>
+                </>
+              );
+            })()}
             {searching && <div className="trn-food-note">Suche läuft…</div>}
             {!searching && searchOffline && <div className="trn-food-note">Open Food Facts ist gerade nicht erreichbar.</div>}
             {!searching && !searchOffline && q.trim().length < 2 && <div className="trn-food-note">Mindestens zwei Zeichen eingeben.</div>}
@@ -1403,7 +1426,7 @@ function FoodOverlay({ dateISO, onClose, applyFoodDay, flash, isOnline }) {
         )}
         {tab === "custom" && (
           <CustomTab items={custom.filter((i) => matchesQuery(i, q))} draft={customDraft} setDraft={setCustomDraft}
-            onPick={(i) => openPick(i, "custom", i.id)} flash={flash}
+            onPick={(i) => openPick(i, "custom", i.id)} flash={flash} aiOn={aiOn}
             onSaved={async () => { await reloadLists(); setCustomDraft(null); }} />
         )}
 
@@ -1651,8 +1674,14 @@ function RecipeTab({ recipes, draft, setDraft, onBook, onSaved, setTab, flash })
   );
 }
 
-/* Eigene Lebensmittel: Name + Naehrwerte pro 100 g. */
-function CustomTab({ items, draft, setDraft, onPick, onSaved, flash }) {
+/* Eigene Lebensmittel: Name + Naehrwerte pro 100 g, wahlweise selbst
+   eingetippt oder per KI geschaetzt. Die Schaetzung ist ausdruecklich ein
+   Vorschlag: sie fuellt nur das Formular, gespeichert wird erst nach
+   Bestaetigung — und jeder Wert bleibt vorher aenderbar. */
+function CustomTab({ items, draft, setDraft, onPick, onSaved, flash, aiOn }) {
+  const [aiText, setAiText] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+
   const save = async () => {
     if (!draft.name.trim()) { flash("Name fehlt"); return; }
     try {
@@ -1668,9 +1697,35 @@ function CustomTab({ items, draft, setDraft, onPick, onSaved, flash }) {
     try { await foodSend("DELETE", `/custom/${id}`); onSaved(); }
     catch (e) { flash("Löschen braucht Netz"); }
   };
+  const estimate = async () => {
+    const text = aiText.trim();
+    if (!text) return;
+    setAiBusy(true);
+    try {
+      const r = await foodSend("POST", "/ai-estimate", { text });
+      if (r.ok) {
+        const it = r.item;
+        setDraft({
+          name: it.name, brand: "",
+          kcal: de(it.per100.kcal), protein: de(it.per100.protein),
+          carbs: de(it.per100.carbs), fat: de(it.per100.fat),
+          annahmen: it.annahmen, sicherheit: it.sicherheit,
+        });
+        setAiText("");
+      } else flash(r.error || "Schätzung fehlgeschlagen");
+    } catch (e) { flash("Schätzung braucht Netz"); }
+    setAiBusy(false);
+  };
+
   if (draft) {
     return (
       <div className="trn-food-draft">
+        {draft.annahmen && (
+          <div className="trn-food-ai-note">
+            <b>Schätzung ({draft.sicherheit} Sicherheit)</b> — {draft.annahmen}
+            <div style={{ marginTop: 4, opacity: .8 }}>Werte prüfen und bei Bedarf überschreiben.</div>
+          </div>
+        )}
         <Field label="Name" value={draft.name} onChange={(v) => setDraft({ ...draft, name: v })} />
         <Field label="Marke (optional)" value={draft.brand} onChange={(v) => setDraft({ ...draft, brand: v })} />
         <div className="trn-mini-label" style={{ margin: "12px 0 6px" }}>Nährwerte pro 100 g</div>
@@ -1689,7 +1744,22 @@ function CustomTab({ items, draft, setDraft, onPick, onSaved, flash }) {
   }
   return (
     <div>
-      <Btn small variant="primary" onClick={() => setDraft({ name: "", brand: "", kcal: "", protein: "", carbs: "", fat: "" })}>+ Eigenes Lebensmittel</Btn>
+      {aiOn && (
+        <div className="trn-food-ai">
+          <div className="trn-mini-label">Selbstgemachtes schätzen lassen</div>
+          <textarea className="trn-textarea sm" style={{ marginTop: 6 }}
+            placeholder="z. B. selbstgemachte Erdbeermarmelade mit Gelierzucker 3:1"
+            value={aiText} onChange={(e) => setAiText(e.target.value)} />
+          <Btn small variant="primary" onClick={estimate} disabled={aiBusy || !aiText.trim()} style={{ marginTop: 8 }}>
+            {aiBusy ? "Schätze…" : "Schätzen"}
+          </Btn>
+          <div className="trn-hint" style={{ marginTop: 6 }}>Liefert einen Vorschlag, den du vor dem Speichern anpassen kannst. Braucht Netz.</div>
+        </div>
+      )}
+      <Btn small variant={aiOn ? "ghost" : "primary"} style={{ marginTop: aiOn ? 12 : 0 }}
+        onClick={() => setDraft({ name: "", brand: "", kcal: "", protein: "", carbs: "", fat: "" })}>
+        + Von Hand anlegen
+      </Btn>
       {items.length === 0 && <div className="trn-food-note">Noch keine eigenen Lebensmittel.</div>}
       <div className="trn-food-list">
         {items.map((it) => (
@@ -2697,6 +2767,10 @@ function Style() {
     .trn-food-meal-btn.active{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;}
 
     .trn-food-draft{margin-top:12px;display:flex;flex-direction:column;gap:10px;}
+    .trn-food-ai{margin-top:12px;padding:11px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;}
+    .trn-food-ai-note{background:rgba(154,134,224,0.12);border:1px solid rgba(154,134,224,0.4);color:#d6cbf5;font-size:11.5px;padding:9px 11px;border-radius:9px;line-height:1.5;}
+    .trn-food-sect{font-size:10px;font-weight:700;color:var(--faint);text-transform:uppercase;letter-spacing:1px;margin:14px 0 2px;}
+    .trn-food-sect:first-child{margin-top:4px;}
     .trn-food-recipe{border-top:1px solid var(--border);padding:10px 0;}
     .trn-food-recipe:first-child{border-top:none;}
     .trn-food-recipe-act{display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap;}
