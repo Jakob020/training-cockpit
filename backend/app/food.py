@@ -24,7 +24,9 @@ Scanner) haengt nur die Kamera davor und ruft sie unveraendert auf.
 Datenqualitaet: fehlende Naehrwerte werden zu ``None``, niemals zu 0. Ein
 geratener Nullwert waere im Tagesprotokoll schlimmer als eine Luecke.
 """
+import re
 import time
+import unicodedata
 
 import requests
 
@@ -44,6 +46,15 @@ PRODUCT_URL = "https://world.openfoodfacts.org/api/v2/product/{code}.json"
 
 TIMEOUT = 8
 MAX_RESULTS = 20
+# Der Index sortiert mehrwortige Anfragen schlecht (er verknuepft mit ODER und
+# laesst die Marke dominieren: "Quark Gut und Guenstig" liefert Kuechentuecher
+# und Broccoli). Deshalb holen wir eine breite Kandidatenmenge und sortieren
+# selbst nach Begriffsabdeckung.
+CANDIDATE_SIZE = 100
+# Fuellwoerter, die in Markennamen fehlen ("Gut & Guenstig" vs. "Gut und
+# Guenstig") und die Abdeckung sonst faelschlich druecken wuerden.
+STOPWORDS = {"und", "oder", "mit", "von", "der", "die", "das", "den", "dem",
+             "im", "in", "fuer", "am", "an", "a"}
 
 # Angeforderte Felder. ``lang`` und ``countries_tags`` stehen nicht auf der
 # Nutzliste, werden aber fuer die Deutschland-Gewichtung gebraucht — ohne sie
@@ -68,6 +79,19 @@ NUTRIENTS = {
 
 CACHE_PREFIX = "food_cache:barcode:"
 CACHE_TTL = 30 * 24 * 3600  # 30 Tage
+
+
+def _norm(s):
+    """Kleinschreibung, Umlaute aufgeloest, Sonderzeichen raus. Damit passt
+    "Guenstig" auf "günstig" und "Gut & Günstig" auf "gut gunstig"."""
+    t = unicodedata.normalize("NFKD", str(s or "").lower())
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    t = t.replace("ß", "ss").replace("&", " ")
+    return re.sub(r"[^a-z0-9]+", " ", t).strip()
+
+
+def _tokens(q):
+    return [t for t in _norm(q).split() if t and t not in STOPWORDS]
 
 
 def _headers():
@@ -153,16 +177,22 @@ def _normalize(p):
     }
 
 
-def _rank_key(item, index):
-    """Sortierschluessel: erst Brauchbarkeit, dann Herkunft, dann Original-
-    reihenfolge (stabil).
+def _rank_key(item, index, tokens):
+    """Sortierschluessel, wichtigstes Kriterium zuerst.
 
-    1. Treffer ohne kcal ans Ende — mit ``langs=de`` liefert OFF deutlich
-       mehr Produkte, aber viele davon ohne Naehrwerte (gemessen: 79 Treffer
-       alle mit kcal ohne ``langs``, 381 mit vielen Luecken mit ``langs=de``).
-       Ohne diese Regel waere die Suche unbrauchbar.
-    2. Deutsche Produkte bevorzugen.
+    1. **Begriffsabdeckung.** Der OFF-Index verknuepft mehrere Woerter mit
+       ODER und laesst dabei die Marke dominieren — "Quark Gut und Guenstig"
+       liefert ungefiltert Kuechentuecher und Broccoli, weil beide von
+       "Gut und Guenstig" sind. Wie viele der eingegebenen Begriffe in Name
+       und Marke vorkommen, sagt viel mehr ueber die Relevanz aus.
+    2. Treffer ohne kcal ans Ende — mit ``langs=de`` liefert OFF deutlich
+       mehr Produkte, aber viele ohne Naehrwerte (gemessen: 79 Treffer alle
+       mit kcal ohne ``langs``, 381 mit vielen Luecken mit ``langs=de``).
+    3. Deutsche Produkte bevorzugen.
+    4. Originalreihenfolge, damit die Sortierung stabil bleibt.
     """
+    hay = _norm(f"{item.get('name', '')} {item.get('brand', '')}")
+    missing = sum(1 for t in tokens if t not in hay)
     has_kcal = 0 if item["per100"].get("kcal") is not None else 1
     countries = item.get("_countries") or []
     german = 0 if (
@@ -170,17 +200,35 @@ def _rank_key(item, index):
         or any("germany" in str(c).lower() for c in countries)
         or any("deutschland" in str(c).lower() for c in countries)
     ) else 1
-    return (has_kcal, german, index)
+    return (missing, has_kcal, german, index)
 
 
-def _finish(items):
-    """Sortieren, kappen und die internen Sortierfelder entfernen.
+def _merge(existing, extra):
+    """Kandidaten zusammenfuehren, Dubletten ueber den Barcode entfernen."""
+    seen = {it["code"] for it in existing if it.get("code")}
+    for it in extra:
+        if not it:
+            continue
+        code = it.get("code")
+        if code and code in seen:
+            continue
+        if code:
+            seen.add(code)
+        existing.append(it)
+    return existing
 
-    Der Index dient als letztes Sortierkriterium und haelt damit die
-    Relevanzreihenfolge von OFF innerhalb gleicher Rangstufen stabil.
-    """
+
+def _full_coverage(items, tokens):
+    if not tokens:
+        return len(items)
+    return sum(1 for it in items
+               if all(t in _norm(f"{it.get('name', '')} {it.get('brand', '')}") for t in tokens))
+
+
+def _finish(items, tokens):
+    """Sortieren, kappen und die internen Sortierfelder entfernen."""
     pairs = list(enumerate(it for it in items if it))
-    ranked = sorted(pairs, key=lambda pair: _rank_key(pair[1], pair[0]))
+    ranked = sorted(pairs, key=lambda pair: _rank_key(pair[1], pair[0], tokens))
     out = []
     for _, it in ranked[:MAX_RESULTS]:
         it.pop("_lang", None)
@@ -227,6 +275,14 @@ def _search_cgi(q, page_size):
 def search(q, page_size=MAX_RESULTS):
     """Volltextsuche. Gibt immer ein Dict zurueck, wirft nie.
 
+    Der Index ist bei mehrwortigen Anfragen unzuverlaessig und streut
+    ausserdem: dieselbe Anfrage liefert nicht immer dieselben Kandidaten.
+    Deshalb wird bei duenner Abdeckung mit den zwei laengsten Begriffen
+    einzeln nachgeschlagen und alles zusammen sortiert. Welcher Begriff das
+    Lebensmittel ist, weiss man vorher nicht — mal steht es vorn ("Quark Gut
+    und Guenstig"), mal hinten ("Gut und Guenstig Quark"); kurze Woerter wie
+    "gut" taugen dafuer nicht.
+
     ``offline`` sagt der Oberflaeche, dass keine Quelle erreichbar war —
     dann zeigt das Overlay den Offline-Hinweis statt eines Fehlers.
     """
@@ -234,16 +290,24 @@ def search(q, page_size=MAX_RESULTS):
     if not q:
         return {"items": [], "offline": False, "source": None}
 
-    page_size = max(1, min(int(page_size or MAX_RESULTS), MAX_RESULTS))
+    tokens = _tokens(q)
 
     try:
-        return {"items": _finish(_search_index(q, page_size)),
-                "offline": False, "source": "index"}
+        items = _search_index(q, CANDIDATE_SIZE)
+        if len(tokens) >= 2 and _full_coverage(items, tokens) < 3:
+            for term in sorted({t for t in tokens if len(t) >= 4}, key=len, reverse=True)[:2]:
+                try:
+                    _merge(items, _search_index(term, CANDIDATE_SIZE))
+                except Exception:
+                    break  # Netz weg: mit dem arbeiten, was schon da ist.
+                if _full_coverage(items, tokens) >= 3:
+                    break
+        return {"items": _finish(items, tokens), "offline": False, "source": "index"}
     except Exception:
         pass  # Index streikt -> Fallback versuchen.
 
     try:
-        return {"items": _finish(_search_cgi(q, page_size)),
+        return {"items": _finish(_search_cgi(q, CANDIDATE_SIZE), tokens),
                 "offline": False, "source": "cgi"}
     except Exception:
         # Beide Wege tot: kein Netz oder OFF down. Leeres Ergebnis mit Flag,

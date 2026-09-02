@@ -1234,6 +1234,24 @@ function FoodOverlay({ dateISO, onClose, applyFoodDay, flash, isOnline }) {
     return () => clearTimeout(t);
   }, [q, tab]);
 
+  /* Ein Rezept verhaelt sich beim Buchen wie ein Lebensmittel: es hat
+     Naehrwerte pro 100 g. Dadurch laesst es sich nach Gewicht eintragen
+     (ein unregelmaessiges Stueck Kuchen wiegt selten genau 1/20) und die
+     Makros stehen schon beim Eingeben da, nicht erst in der Tagessumme. */
+  const openRecipePick = (r) => {
+    const info = r.info || {};
+    setPick({
+      source: "recipe", ref: r.id, name: r.name, brand: "Rezept",
+      per100: info.per100 || {},
+      serving: null,
+      portionG: info.gramm || null,
+      portionen: info.portionen || 1,
+      amount: de(String(Math.round((info.gramm || 100) * 10) / 10)),
+      meal: defaultMeal(),
+      forRecipe: false,
+    });
+  };
+
   const openPick = (it, source, ref, preset) => setPick({
     source, ref: ref || "", name: it.name, brand: it.brand || "",
     per100: it.per100 || {},
@@ -1380,7 +1398,7 @@ function FoodOverlay({ dateISO, onClose, applyFoodDay, flash, isOnline }) {
         )}
         {tab === "recipes" && (
           <RecipeTab recipes={recipes} draft={recipeDraft} setDraft={setRecipeDraft}
-            onBook={bookRecipe} setTab={setTab} flash={flash}
+            onBook={openRecipePick} setTab={setTab} flash={flash}
             onSaved={async () => { await reloadLists(); setRecipeDraft(null); }} />
         )}
         {tab === "custom" && (
@@ -1405,6 +1423,13 @@ function FoodOverlay({ dateISO, onClose, applyFoodDay, flash, isOnline }) {
                       <span className="trn-food-entry-name">{e.name}</span>
                       <span className="trn-food-entry-sub">
                         {e.brand ? `${e.brand} · ` : ""}{kcalOf(e.per100, e.amount_g) ?? "—"} kcal
+                      </span>
+                      {/* Makros je Eintrag — sonst sieht man sie nur in der Tagessumme. */}
+                      <span className="trn-food-entry-macros">
+                        {[["protein", "P"], ["carbs", "C"], ["fat", "F"]].map(([k, lab]) => {
+                          const v = scaleMacro(e.per100, k, e.amount_g);
+                          return `${lab} ${v === null ? "—" : de(Math.round(v * 10) / 10)}`;
+                        }).join(" · ")}
                       </span>
                     </div>
                     <input className="trn-input trn-input-num" inputMode="decimal" defaultValue={de(e.amount_g)}
@@ -1471,7 +1496,17 @@ function FoodList({ items, onPick, onFav, favKeys, empty }) {
 function FoodPicker({ pick, setPick, onConfirm, busy, forRecipe }) {
   const grams = num(pick.amount);
   const kcal = kcalOf(pick.per100, grams);
-  const quick = [pick.serving, 50, 100, 150, 200].filter((v, i, a) => v && a.indexOf(v) === i).slice(0, 4);
+  /* Bei einem Rezept sind Portionen die natuerliche Einheit, bei allem
+     anderen glatte Grammwerte bzw. die Packungsportion. Gramm bleiben in
+     beiden Faellen frei eintippbar — ein Stueck Kuchen wiegt selten genau
+     ein Zwanzigstel. */
+  const pg = pick.portionG;
+  const quick = pg
+    ? [0.5, 1, 2].map((n) => ({ g: Math.round(pg * n * 10) / 10, label: `${de(n)} ${n === 1 ? "Portion" : "Portionen"}` }))
+    : [pick.serving, 50, 100, 150, 200]
+        .filter((v, i, a) => v && a.indexOf(v) === i).slice(0, 4)
+        .map((v) => ({ g: v, label: `${de(v)} g${pick.serving === v ? " · Portion" : ""}` }));
+  const portionsNow = pg && grams > 0 ? Math.round((grams / pg) * 100) / 100 : null;
   /* Naehrwerte fuer die eingetippte Menge — sie rechnen live mit, damit die
      Entscheidung ueber die Portion vor dem Speichern faellt und nicht danach. */
   const macros = [
@@ -1494,6 +1529,11 @@ function FoodPicker({ pick, setPick, onConfirm, busy, forRecipe }) {
           <span className="trn-suffix">g</span>
           <span className="trn-food-kcal">{kcal != null ? `${de(kcal)} kcal` : "keine Nährwerte"}</span>
         </div>
+        {portionsNow != null && (
+          <div className="trn-mini-label" style={{ marginTop: 6 }}>
+            entspricht {de(portionsNow)} {portionsNow === 1 ? "Portion" : "Portionen"} · {de(Math.round(pg * 10) / 10)} g je Portion
+          </div>
+        )}
         {hasAny && (
           <div className="trn-food-macros">
             {macros.map((m) => (
@@ -1505,9 +1545,10 @@ function FoodPicker({ pick, setPick, onConfirm, busy, forRecipe }) {
           </div>
         )}
         <div className="trn-food-quick">
-          {quick.map((v) => (
-            <button key={v} className="trn-food-quick-btn" onClick={() => setPick({ ...pick, amount: de(String(v)) })}>
-              {de(v)} g{pick.serving === v ? " · Portion" : ""}
+          {quick.map((q) => (
+            <button key={q.label} className="trn-food-quick-btn"
+              onClick={() => setPick({ ...pick, amount: de(String(q.g)) })}>
+              {q.label}{pg ? ` · ${de(q.g)} g` : ""}
             </button>
           ))}
         </div>
@@ -1535,7 +1576,6 @@ function FoodPicker({ pick, setPick, onConfirm, busy, forRecipe }) {
 
 /* Rezepte: anlegen, bearbeiten, mit Portionsanzahl buchen. */
 function RecipeTab({ recipes, draft, setDraft, onBook, onSaved, setTab, flash }) {
-  const [portions, setPortions] = useState({});
   const save = async () => {
     if (!draft.zutaten.length) { flash("Mindestens eine Zutat"); return; }
     try {
@@ -1589,20 +1629,17 @@ function RecipeTab({ recipes, draft, setDraft, onBook, onSaved, setTab, flash })
         {recipes.map((r) => {
           const info = r.info || {};
           const perP = (info.per_portion || {}).kcal;
-          const n = portions[r.id] ?? "1";
           return (
             <div className="trn-food-recipe" key={r.id}>
               <div className="trn-food-row-main" style={{ cursor: "default" }}>
                 <span className="trn-food-row-name">{r.name}</span>
                 <span className="trn-food-row-sub">
-                  {r.zutaten.length} Zutaten · {de(info.portionen || 1)} Portionen · {perP != null ? `${de(Math.round(perP))} kcal/Portion` : "—"}
+                  {r.zutaten.length} Zutaten · {de(info.portionen || 1)} Portionen à {de(Math.round((info.gramm || 0) * 10) / 10)} g
+                  {perP != null ? ` · ${de(Math.round(perP))} kcal/Portion` : ""}
                 </span>
               </div>
               <div className="trn-food-recipe-act">
-                <input className="trn-input trn-input-num" inputMode="decimal" value={n}
-                  onChange={(e) => setPortions({ ...portions, [r.id]: e.target.value })} />
-                <span className="trn-suffix">Prt.</span>
-                <Btn small variant="primary" onClick={() => onBook(r, num(n) || 1)}>Buchen</Btn>
+                <Btn small variant="primary" onClick={() => onBook(r)}>Buchen</Btn>
                 <Btn small onClick={() => setDraft({ id: r.id, name: r.name, portionen: String(r.portionen), zutaten: r.zutaten })}>Bearb.</Btn>
                 <button className="trn-del" onClick={() => del(r.id)}>✕</button>
               </div>
@@ -2631,6 +2668,7 @@ function Style() {
     .trn-food-entry-main{flex:1;display:flex;flex-direction:column;gap:1px;min-width:0;}
     .trn-food-entry-name{font-size:13px;line-height:1.3;}
     .trn-food-entry-sub{font-size:10.5px;color:var(--faint);}
+    .trn-food-entry-macros{font-family:var(--mono);font-size:9.5px;color:var(--dim);opacity:.75;margin-top:1px;}
     .trn-food-entry .trn-input-num{width:62px;}
 
     .trn-food-foot{display:flex;align-items:center;gap:10px;padding:10px 14px max(10px,env(safe-area-inset-bottom));border-top:1px solid var(--border);background:var(--surface);}

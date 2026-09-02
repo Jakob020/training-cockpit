@@ -337,6 +337,14 @@ def recipe_totals(recipe):
     return total, gramm
 
 
+def _recipe_per100(recipe):
+    """per100-Snapshot fuers Log: Naehrwerte des Rezepts auf 100 g gerechnet."""
+    total, gramm = recipe_totals(recipe)
+    if gramm <= 0:
+        return {k: None for k in MACROS}
+    return {k: total[k] * 100.0 / gramm for k in MACROS}
+
+
 def recipe_per_portion(recipe):
     """Gramm und Naehrwerte je Portion — die Basis fuers Buchen."""
     total, gramm = recipe_totals(recipe)
@@ -349,15 +357,10 @@ def recipe_per_portion(recipe):
         "portionen": portionen,
         "per_portion": {k: total[k] / portionen for k in MACROS},
         "total": total,
+        # Damit die Oberflaeche ein Rezept wie jedes andere Lebensmittel
+        # behandeln kann: Menge in Gramm eingeben, Naehrwerte rechnen live mit.
+        "per100": _recipe_per100({"zutaten": recipe.get("zutaten") or []}),
     }
-
-
-def _recipe_per100(recipe):
-    """per100-Snapshot fuers Log: Naehrwerte des Rezepts auf 100 g gerechnet."""
-    total, gramm = recipe_totals(recipe)
-    if gramm <= 0:
-        return {k: None for k in MACROS}
-    return {k: total[k] * 100.0 / gramm for k in MACROS}
 
 
 def save_recipe(payload, recipe_id=None):
